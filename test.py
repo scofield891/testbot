@@ -32,9 +32,9 @@ TEST_MODE = False
 VERBOSE_LOG = True
 STARTUP_MSG_ENABLED = True
 
-# ==== YENİ EMA GRACE AYARLARI (Local Breakout) ====
-GRACE_BACK_BARS    = 8   # Cross mumu DAHİL geriye bakılacak toplam bar sayısı
-GRACE_FORWARD_WIN  = 12  # Kesişimden sonra kırılım için beklenecek max bar sayısı
+# ==== LBG (Local Breakout) AYARLARI ====
+LBG_BACK_BARS    = 8   # Cross mumu DAHİL geriye bakılacak tepe/dip bar sayısı
+LBG_FORWARD_WIN  = 12  # Kesişimden sonra kırılım için beklenecek max bar sayısı
 
 LOOKBACK_ATR = 18
 SL_MULTIPLIER = 1.4
@@ -74,9 +74,10 @@ NTX_RISE_POS_RATIO = 0.6
 NTX_RISE_EPS = 0.05
 NTX_RISE_K_HYBRID = 3
 NTX_FROTH_K = 1.0
+
+# EMA Ayarları (Sadece 13 ve 34 kaldı)
 EMA_FAST = 13
 EMA_MID = 34
-EMA_SLOW = 89
 ADX_SOFT = 21
 MIN_BARS = 80
 NEW_SYMBOL_COOLDOWN_MIN = 180
@@ -86,20 +87,10 @@ ADX_RISE_POS_RATIO = 0.6
 ADX_RISE_EPS = 0.0
 ADX_RISE_USE_HYBRID = True
 
-REGIME1_BAND_K_DEFAULT = 0.25
-REGIME1_SLOPE_WIN = 5
-REGIME1_SLOPE_THR_PCT = 0.0
-REGIME1_REQUIRE_2CLOSE = True
-REGIME1_ADX_ADAPTIVE_BAND = True
-
 RECENCY_K = 6
 RECENCY_OPP_K = 2
-GRACE_BARS = 8
 
 USE_GATE_V3 = True
-G3_BAND_K = 0.25
-G3_SLOPE_WIN = 5
-G3_SLOPE_THR_PCT = 0.0
 G3_MIN_ADX = 22
 G3_MIN_ADX_BEAR = 24
 G3_NTX_BONUS_BEAR = 6.0
@@ -119,20 +110,20 @@ BEAR_ADX_OFF = 20 # trend ON/OFF eşiği
 CLASSIC_MIN_RR = 1.0
 
 # ==== SQZ Breakout Ayarları ====
-SQZ_OFF_LOOKBACK = 6 # son kaç bar içinde 'off' olmalı
-SQZ_MOM_SLOPE_WIN = 2 # lb_sqz_val eğim kontrolü için kısa pencere
-SQZ_RANGE_REQUIRE_RETEST = True # range'de retest iste
-SQZ_RETEST_MAX_BARS = 3 # off sonrası kaç bar içinde retest kabul
+SQZ_OFF_LOOKBACK = 6 
+SQZ_MOM_SLOPE_WIN = 2 
+SQZ_RANGE_REQUIRE_RETEST = True 
+SQZ_RETEST_MAX_BARS = 3 
 
 # ====== ORDER BLOCK (OB) Ayarları ======
-ONLY_OB_MODE = False # sadece OB sinyali at (EMA/SQZ kapıdan geçmez)
+ONLY_OB_MODE = False 
 USE_OB_STANDALONE = True
 OB_MIN_RR = 1.0
-OB_REQUIRE_SMI = True # SMI yön teyidi
-OB_REQUIRE_G3_GATE = True # Gate + kalite + trend iç teyidi
-OB_TREND_FILTER = True # ADX≥23 + EMA89 bandı
+OB_REQUIRE_SMI = True 
+OB_REQUIRE_G3_GATE = True 
+OB_TREND_FILTER = False # 89 kalktığı için False yapıldı
 OB_LOOKBACK = 30
-OB_DISPLACEMENT_ATR = 1.50 # displacement bar TR >= 1.5*ATR
+OB_DISPLACEMENT_ATR = 1.50 
 OB_BODY_RATIO_MIN = 0.60
 OB_FIRST_TOUCH_ONLY = True
 OB_RETEST_REQUIRED = True
@@ -143,11 +134,11 @@ OB_CONS_VOL_THR = 1.80
 OB_MIN_R_OVER_ATR = 0.80
 
 # ---- SAFE DEFAULTS ----
-ONLY_OB_MODE      = bool(globals().get("ONLY_OB_MODE", False))
-SEND_REJECT_MSG   = bool(globals().get("SEND_REJECT_MSG", False))
-OB_HYBRID         = bool(globals().get("OB_HYBRID", False))
-OB_REQUIRE_SMI    = bool(globals().get("OB_REQUIRE_SMI", False))
-OB_REQUIRE_G3_GATE= bool(globals().get("OB_REQUIRE_G3_GATE", False))
+ONLY_OB_MODE = bool(globals().get("ONLY_OB_MODE", False))
+SEND_REJECT_MSG = bool(globals().get("SEND_REJECT_MSG", False))
+OB_HYBRID = bool(globals().get("OB_HYBRID", False))
+OB_REQUIRE_SMI = bool(globals().get("OB_REQUIRE_SMI", False))
+OB_REQUIRE_G3_GATE = bool(globals().get("OB_REQUIRE_G3_GATE", False))
 
 # ==== Dynamic mode & profil ====
 DYNAMIC_MODE = True
@@ -155,7 +146,6 @@ FF_ACTIVE_PROFILE = os.getenv("FF_PROFILE", "garantici")
 
 if FF_ACTIVE_PROFILE == "agresif":
     NTX_LOCAL_WIN = 240
-    BANDK_MIN, BANDK_MAX = 0.18, 0.35
     VOL_MA_RATIO_MIN = 1.02
     VOL_Z_MIN = 0.8
     FF_BODY_MIN = 0.40
@@ -165,7 +155,6 @@ if FF_ACTIVE_PROFILE == "agresif":
     G3_BOS_CONFIRM_BARS = max(1, G3_BOS_CONFIRM_BARS - 1)
 else:
     NTX_LOCAL_WIN = 300
-    BANDK_MIN, BANDK_MAX = 0.22, 0.35
     VOL_MA_RATIO_MIN = 1.05
     VOL_Z_MIN = 1.0
     FF_BODY_MIN = 0.45
@@ -342,7 +331,7 @@ def load_state():
             for k, v in data.items():
                 if isinstance(v, dict):
                     for dk in DT_KEYS:
-                        if dk in v:
+                         if dk in v:
                             v[dk] = _parse_dt(v[dk])
                     if 'used_ob_ids' in v and isinstance(v['used_ob_ids'], list):
                         v['used_ob_ids'] = set(v['used_ob_ids'])
@@ -408,7 +397,7 @@ def format_signal_msg(symbol: str, timeframe: str, side: str,
                      tz_name: str = DEFAULT_TZ) -> str:
     tz = _safe_tz()
     date_str = datetime.now(tz).strftime("%d.%m.%Y")
-    title = "TEST BOT: BUY (LONG) 🚀" if side == "buy" else "TEST BOT: SELL (SHORT) 📉"
+    title = "LBG BOT: BUY (LONG) 🚀" if side == "buy" else "LBG BOT: SELL (SHORT) 📉"
     lines = [
         f"{symbol} {timeframe}: {title}",
         f"Sebep: {reason_line}",
@@ -477,17 +466,17 @@ def apply_split_to_state(state: dict, plan: dict):
     state['rest_pct'] = plan['rest_pct']
     state['plan_desc'] = plan['desc']
 
-def build_reason_text(side: str, cross_up_1334: bool, cross_dn_1334: bool, grace_long: bool, grace_short: bool, structL: bool, structS: bool, obL_ok: bool, obS_ok: bool, dip_recent: bool, top_recent: bool) -> str:
+def build_reason_text(side: str, cross_up_1334: bool, cross_dn_1334: bool, lbg_long: bool, lbg_short: bool, structL: bool, structS: bool, obL_ok: bool, obS_ok: bool, dip_recent: bool, top_recent: bool) -> str:
     tags = []
     if side == "buy":
         if cross_up_1334: tags.append("EMA 13/34 Cross (Up)")
-        if grace_long: tags.append("Grace (LBG)")
+        if lbg_long: tags.append("LBG Breakout")
         if structL: tags.append("BOS Long")
         if obL_ok: tags.append("Order Block Long")
         if dip_recent: tags.append("Dip onaylı")
     else:
         if cross_dn_1334: tags.append("EMA 13/34 Cross (Down)")
-        if grace_short: tags.append("Grace (LBG)")
+        if lbg_short: tags.append("LBG Breakout")
         if structS: tags.append("BOS Short")
         if obS_ok: tags.append("Order Block Short")
         if top_recent: tags.append("Tepe onaylı")
@@ -757,7 +746,7 @@ def calculate_indicators(df: pd.DataFrame, symbol: str, timeframe: str) -> pd.Da
     closes = df['close'].values.astype(np.float64)
     df['ema13'] = calculate_ema(closes, EMA_FAST)
     df['ema34'] = calculate_ema(closes, EMA_MID)
-    df['ema89'] = calculate_ema(closes, EMA_SLOW)
+    # EMA 89 KALDIRILDI
     df = calculate_bb(df)
     df = calc_sqzmom_lb(df)
     df = calculate_adx(df, symbol)
@@ -800,15 +789,7 @@ def ntx_vote(df: pd.DataFrame, ntx_thr: float) -> bool:
     return bool(np.isfinite(ntx_last) and ntx_last >= ntx_thr)
 
 def compute_dynamic_band_k(df: pd.DataFrame, adx_last: float) -> float:
-    band_k_adx = 0.20 if (np.isfinite(adx_last) and adx_last >= 25) else (0.30 if (np.isfinite(adx_last) and adx_last < 18) else REGIME1_BAND_K_DEFAULT)
-    c2 = float(df['close'].iloc[-2]); atr2 = float(df['atr'].iloc[-2])
-    atr_pct = atr2 / abs(c2) if (np.isfinite(atr2) and np.isfinite(c2) and c2 != 0) else 0.0
-    atr_pct = clamp(atr_pct, 0.0, 0.10)
-    band_k_vol = float(np.interp(atr_pct, [0.006, 0.025], [0.20, 0.35]))
-    if FF_ACTIVE_PROFILE == "agresif": w_adx, w_vol = 0.6, 0.4
-    else: w_adx, w_vol = 0.4, 0.6
-    band_k = w_adx * band_k_adx + w_vol * band_k_vol
-    return clamp(band_k, BANDK_MIN, BANDK_MAX)
+    return 0.25 # Basitleştirildi, EMA 89 olmadığı için çok kritik değil ama SQZ için dursun
 
 def compute_ntx_local_thr(df: pd.DataFrame, base_thr: float, symbol: str = None) -> (float, float):
     q_val = None
@@ -923,13 +904,11 @@ def is_sqz_breakout(df: pd.DataFrame, side: str, regime: str, adx_last: float, b
     if not off_ok: return False, "sqz_not_off"
     mom_ok = _lb_val_momentum(df, side=side, win=SQZ_MOM_SLOPE_WIN)
     if not mom_ok: return False, "lb_val_mom_fail"
-    band_k = compute_dynamic_band_k(df, adx_last)
-    trend_ok, t_dbg = _trend_ok(df, side, band_k, G3_SLOPE_WIN, G3_SLOPE_THR_PCT)
-    if not trend_ok: return False, f"trend_fail({t_dbg})"
+    # Trend filtresi (EMA 89) kaldırıldı
     fk_ok, fk_dbg = fake_filter_v2(df, side=side, bear_mode=bear_mode)
     if not fk_ok: return False, f"ff_fail({fk_dbg})"
     if regime == "range":
-        if not _range_retest_ok(df, side=side, max_bars=SQZ_RETEST_MAX_BARS):
+         if not _range_retest_ok(df, side=side, max_bars=SQZ_RETEST_MAX_BARS):
             return False, "retest_fail"
     entry = float(df['close'].iloc[-2])
     atrv = float(df['atr'].iloc[-2]) if 'atr' in df.columns else np.nan
@@ -956,26 +935,11 @@ def _last_swing_levels(df, win=G3_SWING_WIN):
         if sh is not None and sl is not None: break
     return sh, sl
 
-def _trend_ok(df, side, band_k, slope_win, slope_thr_pct):
-    c2 = float(df['close'].iloc[-2]); e89 = float(df['ema89'].iloc[-2]); atr2 = float(df['atr'].iloc[-2])
-    c3 = float(df['close'].iloc[-3]); e89_3 = float(df['ema89'].iloc[-3]); atr3 = float(df['atr'].iloc[-3])
-    if any(map(lambda x: not np.isfinite(x), [c2,e89,atr2,c3,e89_3,atr3])): return False, "nan"
-    if side == 'long': band_ok = (c2 > e89 + band_k*atr2) and (c3 > e89_3 + band_k*atr3)
-    else: band_ok = (c2 < e89 - band_k*atr2) and (c3 < e89_3 - band_k*atr3)
-    if len(df) > slope_win + 2 and pd.notna(df['ema89'].iloc[-2 - slope_win]):
-        e_now = float(df['ema89'].iloc[-2]); e_then = float(df['ema89'].iloc[-2 - slope_win])
-        pct_slope = (e_now - e_then) / max(abs(e_then), 1e-12)
-    else: pct_slope = 0.0
-    slope_ok = (pct_slope > slope_thr_pct/100.0) if side=='long' else (pct_slope < -slope_thr_pct/100.0)
-    return (band_ok and slope_ok), f"band={band_ok},slope={pct_slope*100:.2f}%"
+# EMA 89 OLMADIĞI İÇİN TREND OK SİLİNDİ
 
 def _ob_trend_filter(df: pd.DataFrame, side: str) -> bool:
-    adx_last = float(df['adx'].iloc[-2]) if pd.notna(df['adx'].iloc[-2]) else np.nan
-    if not np.isfinite(adx_last) or adx_last < 23: return False
-    band_k = compute_dynamic_band_k(df, adx_last)
-    c2 = float(df['close'].iloc[-2]); e89 = float(df['ema89'].iloc[-2]); atr2 = float(df['atr'].iloc[-2])
-    if not all(map(np.isfinite, [c2, e89, atr2])): return False
-    return (c2 > e89 + band_k*atr2) if side == "long" else (c2 < e89 - band_k*atr2)
+    # 89 kalktığı için bu her zaman True döner (devre dışı)
+    return True
 
 def _momentum_ok(df, side, adx_last, vote_ntx, ntx_thr, bear_mode, regime: str = None):
     adx_min = 0 if bear_mode else G3_MIN_ADX
@@ -1158,15 +1122,13 @@ def _log_false_breakdown():
         logger.info(f" - {name}: {f}/{total} ({(f/total*100):.1f}%)")
 
 async def entry_gate_v3(df, side, adx_last, vote_ntx, ntx_thr, bear_mode, symbol=None, regime: str = None):
-    band_k = G3_BAND_K
+    # Trend filtresi (EMA 89) kaldırıldı, sadece momentum ve kalite bakıyoruz
     ntx_q = float('nan')
     if DYNAMIC_MODE:
-        band_k = compute_dynamic_band_k(df, adx_last)
         ntx_thr, ntx_q = compute_ntx_local_thr(df, base_thr=ntx_thr, symbol=symbol)
     mom_ok_base, m_dbg = _momentum_ok(df, side, adx_last, vote_ntx, ntx_thr, bear_mode, regime=regime)
-    trend_ok, t_dbg = _trend_ok(df, side, band_k, G3_SLOPE_WIN, G3_SLOPE_THR_PCT)
     quality_ok, q_dbg = _quality_ok(df, side, bear_mode)
-    return (mom_ok_base and trend_ok and quality_ok), f"mom={mom_ok_base}, trnd={trend_ok}, qual={quality_ok}"
+    return (mom_ok_base and quality_ok), f"mom={mom_ok_base}, qual={quality_ok}"
 
 async def check_signals(symbol: str, timeframe: str = '4h') -> None:
     tz = _safe_tz()
@@ -1177,9 +1139,6 @@ async def check_signals(symbol: str, timeframe: str = '4h') -> None:
         if until and now < until:
             await mark_status(symbol, "cooldown", "new_symbol_cooldown")
             return
-
-        if TEST_MODE:
-             pass # Eski random data kodunu kaldırdım, gerçek veri kullansın
 
         limit_need = max(150, LOOKBACK_ATR + 80, ADX_PERIOD + 40)
         ohlcv = await fetch_ohlcv_async(symbol, timeframe, limit=limit_need)
@@ -1236,7 +1195,7 @@ async def check_signals(symbol: str, timeframe: str = '4h') -> None:
         okL, _ = await entry_gate_v3(df, "long", adx_last, vote_ntx, ntx_thr, bear_mode, symbol, regime)
         okS, _ = await entry_gate_v3(df, "short", adx_last, vote_ntx, ntx_thr, bear_mode, symbol, regime)
 
-        # OB Logic
+        # OB Logic (89 Filtresi Çıkarıldı)
         obL_ok, _, obL_high, obL_low, obL_id = _find_displacement_ob(df, side="long")
         obS_ok, _, obS_high, obS_low, obS_id = _find_displacement_ob(df, side="short")
         if OB_HYBRID and not obL_ok:
@@ -1246,8 +1205,9 @@ async def check_signals(symbol: str, timeframe: str = '4h') -> None:
 
         obL_rr_ok, obL_prices, _ = _ob_rr_ok(df, "long", obL_high, obL_low)
         obS_rr_ok, obS_prices, _ = _ob_rr_ok(df, "short", obS_high, obS_low)
-        obL_trend_ok = (not OB_TREND_FILTER) or _ob_trend_filter(df, "long")
-        obS_trend_ok = (not OB_TREND_FILTER) or _ob_trend_filter(df, "short")
+        # EMA 89 filtresi OB için de kapalı
+        obL_trend_ok = True 
+        obS_trend_ok = True
         
         ob_req_smi = bool(OB_REQUIRE_SMI)
         ob_req_gate = bool(OB_REQUIRE_G3_GATE)
@@ -1258,41 +1218,18 @@ async def check_signals(symbol: str, timeframe: str = '4h') -> None:
         obL_touch_ok = (not OB_FIRST_TOUCH_ONLY) or (obL_id and (obL_id not in used_set))
         obS_touch_ok = (not OB_FIRST_TOUCH_ONLY) or (obS_id and (obS_id not in used_set))
 
-        ob_buy_standalone = USE_OB_STANDALONE and obL_ok and obL_rr_ok and obL_smi_ok and obL_gate_ok and obL_touch_ok and obL_trend_ok
-        ob_sell_standalone = USE_OB_STANDALONE and obS_ok and obS_rr_ok and obS_smi_ok and obS_gate_ok and obS_touch_ok and obS_trend_ok
+        ob_buy_standalone = USE_OB_STANDALONE and obL_ok and obL_rr_ok and obL_smi_ok and obL_gate_ok and obL_touch_ok
+        ob_sell_standalone = USE_OB_STANDALONE and obS_ok and obS_rr_ok and obS_smi_ok and obS_gate_ok and obS_touch_ok
 
-        # SQZ Logic
+        # SQZ Logic (EMA 89 yok)
         sqzL_ok, _ = is_sqz_breakout(df, "long", regime, adx_last, bear_mode)
         sqzS_ok, _ = is_sqz_breakout(df, "short", regime, adx_last, bear_mode)
 
-        # EMA Logic Setup
-        if REGIME1_ADX_ADAPTIVE_BAND and np.isfinite(adx_last):
-            band_k = 0.20 if adx_last >= 25 else (0.30 if adx_last < 18 else REGIME1_BAND_K_DEFAULT)
-        else: band_k = REGIME1_BAND_K_DEFAULT
-        
-        c2 = float(df['close'].iloc[-2]); c3 = float(df['close'].iloc[-3])
-        e89_2 = float(df['ema89'].iloc[-2]); e89_3 = float(df['ema89'].iloc[-3])
-        atr2 = float(df['atr'].iloc[-2]); atr3 = float(df['atr'].iloc[-3])
-        
-        if REGIME1_REQUIRE_2CLOSE:
-            long_band_ok = (c2 > e89_2 + band_k*atr2) and (c3 > e89_3 + band_k*atr3)
-            short_band_ok = (c2 < e89_2 - band_k*atr2) and (c3 < e89_3 - band_k*atr3)
-        else:
-            long_band_ok = (c2 > e89_2 + band_k*atr2)
-            short_band_ok = (c2 < e89_2 - band_k*atr2)
-
-        if len(df) > REGIME1_SLOPE_WIN + 2 and pd.notna(df['ema89'].iloc[-2 - REGIME1_SLOPE_WIN]):
-            e89_now = float(df['ema89'].iloc[-2])
-            e89_then = float(df['ema89'].iloc[-2 - REGIME1_SLOPE_WIN])
-            pct_slope = (e89_now - e89_then) / max(abs(e89_then), 1e-12)
-        else: pct_slope = 0.0
-        slope_thr = REGIME1_SLOPE_THR_PCT / 100.0
-
+        # === EMA 13/34 Cross ===
         e13 = df['ema13']; e34 = df['ema34']
         e13_prev, e34_prev = e13.iloc[-3], e34.iloc[-3]
         e13_last, e34_last = e13.iloc[-2], e34.iloc[-2]
         
-        # --- HATA DÜZELTME: Bu tanımları tutmalıyız ki log listesi çökmesin ---
         cross_up_1334 = (pd.notna(e13_prev) and pd.notna(e34_prev) and pd.notna(e13_last) and pd.notna(e34_last)
                          and (e13_prev <= e34_prev) and (e13_last > e34_last))
         cross_dn_1334 = (pd.notna(e13_prev) and pd.notna(e34_prev) and pd.notna(e13_last) and pd.notna(e34_last)
@@ -1304,39 +1241,35 @@ async def check_signals(symbol: str, timeframe: str = '4h') -> None:
         idx_up = _last_true_index(cross_up_series, idx_lastbar)
         idx_dn = _last_true_index(cross_dn_series, idx_lastbar)
 
-        # === YENİ SİSTEM: GRACE LBG (Local Breakout) ===
-        # ESKİ KOD SİLİNDİ, YENİSİ MONTE EDİLDİ
-        
-        grace_long = False
+        # === LBG (Local Breakout) SİSTEMİ ===
+        # Burada EMA 89'dan bağımsız, sadece 13/34 kesişimi sonrası lokal kırılım aranıyor.
+        lbg_long = False
         if idx_up >= 0:
             bars_since = idx_lastbar - idx_up
-            if 0 < bars_since <= GRACE_FORWARD_WIN:
-                lookback_idx = max(0, idx_up - (GRACE_BACK_BARS - 1))
+            if 0 < bars_since <= LBG_FORWARD_WIN:
+                lookback_idx = max(0, idx_up - (LBG_BACK_BARS - 1))
                 ref_high = df['high'].iloc[lookback_idx : idx_up + 1].max()
                 check_range = df.iloc[idx_up + 1 : idx_lastbar + 1]
                 if not check_range.empty and (check_range['close'] > ref_high).any():
-                    grace_long = True
+                    lbg_long = True
                     if VERBOSE_LOG: logger.debug(f"{symbol} {timeframe}: LBG LONG! Cross@{idx_up}, Ref={ref_high:.4f}")
 
-        grace_short = False
+        lbg_short = False
         if idx_dn >= 0:
             bars_since = idx_lastbar - idx_dn
-            if 0 < bars_since <= GRACE_FORWARD_WIN:
-                lookback_idx = max(0, idx_dn - (GRACE_BACK_BARS - 1))
+            if 0 < bars_since <= LBG_FORWARD_WIN:
+                lookback_idx = max(0, idx_dn - (LBG_BACK_BARS - 1))
                 ref_low = df['low'].iloc[lookback_idx : idx_dn + 1].min()
                 check_range = df.iloc[idx_dn + 1 : idx_lastbar + 1]
                 if not check_range.empty and (check_range['close'] < ref_low).any():
-                    grace_short = True
+                    lbg_short = True
                     if VERBOSE_LOG: logger.debug(f"{symbol} {timeframe}: LBG SHORT! Cross@{idx_dn}, Ref={ref_low:.4f}")
-
-        allow_long = grace_long
-        allow_short = grace_short
         
-        # ... (Kodun geri kalanı 2100. satıra kadar aynı devam ediyor) ...
         structL, structS = False, False
 
-        buy_classic = (allow_long and smi_open_green and is_green and okL and fk_ok_L and long_band_ok and (pct_slope > slope_thr))
-        sell_classic = (allow_short and smi_open_red and is_red and okS and fk_ok_S and short_band_ok and (pct_slope < -slope_thr))
+        # === ENTRY LOGIC (EMA 89 YOK, SADECE LBG + MOM + FILTER) ===
+        buy_classic = (lbg_long and smi_open_green and is_green and okL and fk_ok_L)
+        sell_classic = (lbg_short and smi_open_red and is_red and okS and fk_ok_S)
 
         buy_ob = ob_buy_standalone
         sell_ob = ob_sell_standalone
@@ -1355,34 +1288,26 @@ async def check_signals(symbol: str, timeframe: str = '4h') -> None:
             if buy_condition:
                 if buy_ob: reason = "Order Block"
                 elif buy_sqz: reason = "SQZ Breakout"
-                else: reason = "EMA Cross + Local Break"
+                else: reason = "LBG Breakout (13/34)"
             elif sell_condition:
                 if sell_ob: reason = "Order Block"
                 elif sell_sqz: reason = "SQZ Breakout"
-                else: reason = "EMA Cross + Local Break"
+                else: reason = "LBG Breakout (13/34)"
             else: reason = "N/A"
 
         criteria = [
             ("cross_up_1334", cross_up_1334),
             ("cross_dn_1334", cross_dn_1334),
-            ("reg1_long_band_ok", long_band_ok),
-            ("reg1_short_band_ok", short_band_ok),
-            ("reg1_slope_pos", pct_slope > slope_thr),
-            ("reg1_slope_neg", pct_slope < -slope_thr),
-            ("grace_long", grace_long),
-            ("grace_short", grace_short),
+            ("lbg_long", lbg_long),
+            ("lbg_short", lbg_short),
             ("smi_open_green", smi_open_green),
             ("smi_open_red", smi_open_red),
             ("fk_long", fk_ok_L),
             ("fk_short", fk_ok_S),
             ("is_green", is_green),
             ("is_red", is_red),
-            ("allow_long", allow_long),
-            ("allow_short", allow_short),
             ("order_block_long", obL_ok),
             ("order_block_short", obS_ok),
-            ("ob_buy_trend_ok", obL_trend_ok),
-            ("ob_sell_trend_ok", obS_trend_ok),
             ("sqz_long", sqzL_ok),
             ("sqz_short", sqzS_ok),
         ]
@@ -1484,7 +1409,7 @@ async def check_signals(symbol: str, timeframe: str = '4h') -> None:
                     await enqueue_message(format_signal_msg(symbol, timeframe, "sell", entry_price, sl_price, tp1_price, tp2_price, reason))
                     save_state()
 
-        # Exit/TP logic (Simplified for brevity - keeps existing positions managed)
+        # Exit/TP logic
         if current_pos['signal'] == 'buy':
             current_price = float(df['close'].iloc[-1])
             if exit_long:
@@ -1496,7 +1421,7 @@ async def check_signals(symbol: str, timeframe: str = '4h') -> None:
             current_price = float(df['close'].iloc[-1])
             if exit_short:
                  async with _stats_lock:
-                    signal_cache[cur_key] = _default_pos_state()
+                     signal_cache[cur_key] = _default_pos_state()
                  await enqueue_message(f"{symbol} {timeframe}: EMA EXIT (SHORT) 🔁")
                  save_state()
 
@@ -1515,7 +1440,7 @@ async def main():
         for s in (signal.SIGINT, signal.SIGTERM): loop.add_signal_handler(s, _handle_stop)
     except NotImplementedError: pass
     asyncio.create_task(message_sender())
-    if STARTUP_MSG_ENABLED: await enqueue_message("TEST BOT BAŞLATILDI! (LBG + FullCode) 🚀")
+    if STARTUP_MSG_ENABLED: await enqueue_message("TEST BOT BAŞLATILDI! (SADE LBG + NO 89) 🚀")
     await load_markets()
     while not _stop.is_set():
         try:
