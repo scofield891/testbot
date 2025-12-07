@@ -1081,20 +1081,9 @@ def _last_swing_levels(df, win=G3_SWING_WIN):
             break
     return sh, sl
 def _trend_ok(df, side, band_k, slope_win, slope_thr_pct):
-    c2 = float(df['close'].iloc[-2]); e89 = float(df['ema89'].iloc[-2]); atr2 = float(df['atr'].iloc[-2])
-    c3 = float(df['close'].iloc[-3]); e89_3 = float(df['ema89'].iloc[-3]); atr3 = float(df['atr'].iloc[-3])
-    if any(map(lambda x: not np.isfinite(x), [c2,e89,atr2,c3,e89_3,atr3])): return False, "nan"
-    if side == 'long':
-        band_ok = (c2 > e89 + band_k*atr2) and (c3 > e89_3 + band_k*atr3)
-    else:
-        band_ok = (c2 < e89 - band_k*atr2) and (c3 < e89_3 - band_k*atr3)
-    if len(df) > slope_win + 2 and pd.notna(df['ema89'].iloc[-2 - slope_win]):
-        e_now = float(df['ema89'].iloc[-2]); e_then = float(df['ema89'].iloc[-2 - slope_win])
-        pct_slope = (e_now - e_then) / max(abs(e_then), 1e-12)
-    else:
-        pct_slope = 0.0
-    slope_ok = (pct_slope > slope_thr_pct/100.0) if side=='long' else (pct_slope < -slope_thr_pct/100.0)
-    return (band_ok and slope_ok), f"band={band_ok},slope={pct_slope*100:.2f}%"
+    # EMA89 band + eğim filtresi devre dışı
+    return True, "trend_disabled"
+
 def _ob_trend_filter(df: pd.DataFrame, side: str) -> bool:
     adx_last = float(df['adx'].iloc[-2]) if pd.notna(df['adx'].iloc[-2]) else np.nan
     if not np.isfinite(adx_last) or adx_last < 23: # ADX≥23
