@@ -1648,8 +1648,12 @@ async def check_signals(symbol: str, timeframe: str = '4h') -> None:
                         )
 
         # EMA sinyali için artık SADECE bu teyitli grace kullanılsın
-        allow_long = grace_long
-        allow_short = grace_short
+        ema_aligned_long = pd.notna(e13_last) and pd.notna(e34_last) and (e13_last > e34_last)
+        ema_aligned_short = pd.notna(e13_last) and pd.notna(e34_last) and (e13_last < e34_last)
+
+        allow_long = grace_long and ema_aligned_long
+        allow_short = grace_short and ema_aligned_short
+
         structL, structS = False, False
         entry_price_c = float(df['close'].iloc[-2])
         b_sl = _classic_sl_only(df, "buy", atr_value, entry_price_c)
