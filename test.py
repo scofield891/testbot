@@ -26,11 +26,9 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 # ================== Sabitler ==================
-# Render Environment Variable'lardan okur
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
-
-TEST_MODE = False  # Gerçek veri ile test
+TEST_MODE = False
 VERBOSE_LOG = True
 STARTUP_MSG_ENABLED = True
 
@@ -40,8 +38,13 @@ GRACE_FORWARD_WIN  = 12  # Kesişimden sonra kırılım için beklenecek max bar
 
 LOOKBACK_ATR = 18
 SL_MULTIPLIER = 1.4
-TP_MULTIPLIER1 = 1.0
-TP_MULTIPLIER2 = 2.0
+TP_MULTIPLIER1 = None
+TP_MULTIPLIER2 = None
+
+# Güvenli defaults
+TP_MULTIPLIER1 = 1.0 if 'TP_MULTIPLIER1' not in globals() or TP_MULTIPLIER1 is None else TP_MULTIPLIER1
+TP_MULTIPLIER2 = 2.0 if 'TP_MULTIPLIER2' not in globals() or TP_MULTIPLIER2 is None else TP_MULTIPLIER2
+
 SL_BUFFER = 0.15
 COOLDOWN_MINUTES = 60
 INSTANT_SL_BUFFER = 0.04
@@ -73,7 +76,7 @@ NTX_RISE_K_HYBRID = 3
 NTX_FROTH_K = 1.0
 EMA_FAST = 13
 EMA_MID = 34
-EMA_SLOW = 50 # EMA 89 yerine 50 (İsteğe bağlı 89 yapabilirsin)
+EMA_SLOW = 89
 ADX_SOFT = 21
 MIN_BARS = 80
 NEW_SYMBOL_COOLDOWN_MIN = 180
@@ -83,7 +86,6 @@ ADX_RISE_POS_RATIO = 0.6
 ADX_RISE_EPS = 0.0
 ADX_RISE_USE_HYBRID = True
 
-# Eski Rejim Ayarları (Loglama için gerekli)
 REGIME1_BAND_K_DEFAULT = 0.25
 REGIME1_SLOPE_WIN = 5
 REGIME1_SLOPE_THR_PCT = 0.0
@@ -92,7 +94,7 @@ REGIME1_ADX_ADAPTIVE_BAND = True
 
 RECENCY_K = 6
 RECENCY_OPP_K = 2
-GRACE_BARS = 8 # (LBG mantığıyla eziliyor ama parametre hatası vermemesi için kalsın)
+GRACE_BARS = 8
 
 USE_GATE_V3 = True
 G3_BAND_K = 0.25
@@ -112,25 +114,25 @@ G3_FF_MIN_SCORE = 3
 G3_FF_MIN_SCORE_BEAR = 4
 USE_ROBUST_SLOPE = True
 SCAN_PAUSE_SEC = 120
-BEAR_ADX_ON = 23
-BEAR_ADX_OFF = 20
+BEAR_ADX_ON = 23 # trend ON/OFF eşiği
+BEAR_ADX_OFF = 20 # trend ON/OFF eşiği
 CLASSIC_MIN_RR = 1.0
 
 # ==== SQZ Breakout Ayarları ====
-SQZ_OFF_LOOKBACK = 6
-SQZ_MOM_SLOPE_WIN = 2
-SQZ_RANGE_REQUIRE_RETEST = True
-SQZ_RETEST_MAX_BARS = 3
+SQZ_OFF_LOOKBACK = 6 # son kaç bar içinde 'off' olmalı
+SQZ_MOM_SLOPE_WIN = 2 # lb_sqz_val eğim kontrolü için kısa pencere
+SQZ_RANGE_REQUIRE_RETEST = True # range'de retest iste
+SQZ_RETEST_MAX_BARS = 3 # off sonrası kaç bar içinde retest kabul
 
 # ====== ORDER BLOCK (OB) Ayarları ======
-ONLY_OB_MODE = False
+ONLY_OB_MODE = False # sadece OB sinyali at (EMA/SQZ kapıdan geçmez)
 USE_OB_STANDALONE = True
 OB_MIN_RR = 1.0
-OB_REQUIRE_SMI = True
-OB_REQUIRE_G3_GATE = True
-OB_TREND_FILTER = True
+OB_REQUIRE_SMI = True # SMI yön teyidi
+OB_REQUIRE_G3_GATE = True # Gate + kalite + trend iç teyidi
+OB_TREND_FILTER = True # ADX≥23 + EMA89 bandı
 OB_LOOKBACK = 30
-OB_DISPLACEMENT_ATR = 1.50
+OB_DISPLACEMENT_ATR = 1.50 # displacement bar TR >= 1.5*ATR
 OB_BODY_RATIO_MIN = 0.60
 OB_FIRST_TOUCH_ONLY = True
 OB_RETEST_REQUIRED = True
@@ -141,8 +143,11 @@ OB_CONS_VOL_THR = 1.80
 OB_MIN_R_OVER_ATR = 0.80
 
 # ---- SAFE DEFAULTS ----
-SEND_REJECT_MSG = False
+ONLY_OB_MODE      = bool(globals().get("ONLY_OB_MODE", False))
+SEND_REJECT_MSG   = bool(globals().get("SEND_REJECT_MSG", False))
 OB_HYBRID         = bool(globals().get("OB_HYBRID", False))
+OB_REQUIRE_SMI    = bool(globals().get("OB_REQUIRE_SMI", False))
+OB_REQUIRE_G3_GATE= bool(globals().get("OB_REQUIRE_G3_GATE", False))
 
 # ==== Dynamic mode & profil ====
 DYNAMIC_MODE = True
@@ -175,6 +180,8 @@ R_MAX_ATR_MULT_RANGE = 1.6
 R_MAX_ATR_MULT_TREND = 2.2
 TP1_MIN_ATR_GAP_RANGE = 0.8
 TP1_MIN_ATR_GAP_TREND = 1.0
+
+# ==== Dip-Tepe Parametreleri ====
 DIPTEPE_ATR_LEN = 14
 DIPTEPE_K_ATR = 1.25
 DIPTEPE_BRK_LEN = 4
@@ -183,8 +190,10 @@ DIPTEPE_SEQ_WIN = 3
 DIPTEPE_MIN_SEP = 8
 DIPTEPE_BODY_MIN = 0.30
 DIPTEPE_A_LOOKBACK = 50
-STRONG_TREND_ADX = 28
+STRONG_TREND_ADX = 28 
+
 DEFAULT_TZ = os.getenv("BOT_TZ", "Europe/Istanbul")
+SEND_REJECT_MSG = False 
 
 # Telegram throttle
 MESSAGE_THROTTLE_SECS = 20.0
@@ -192,13 +201,13 @@ STATE_SAVE_DEBOUNCE_SECS = 2.0
 _state_lock = threading.Lock()
 _stats_lock = asyncio.Lock()
 _last_state_save = 0.0
-_last_message_hashes = {}
-scan_status = {}
-crit_total_counts = Counter()
-crit_false_counts = Counter()
-new_symbol_until = {}
+_last_message_hashes = {} 
+scan_status = {} 
+crit_total_counts = Counter() 
+crit_false_counts = Counter() 
+new_symbol_until = {} 
 _ntx_cache_lock = threading.Lock()
-ntx_local_cache = {}
+ntx_local_cache = {} 
 
 async def mark_status(symbol: str, code: str, detail: Optional[str] = None):
     async with _stats_lock:
@@ -218,7 +227,6 @@ if not logger.handlers:
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setFormatter(formatter)
     logger.addHandler(console_handler)
-    # Test botu için ayrı log dosyası
     file_handler = RotatingFileHandler('bot_test.log', maxBytes=5_000_000, backupCount=3)
     file_handler.setFormatter(formatter)
     logger.addHandler(file_handler)
@@ -239,6 +247,8 @@ for h in logger.handlers:
     h.addFilter(MinimalInfoFilter())
 logging.getLogger('telegram').setLevel(logging.ERROR)
 logging.getLogger('httpx').setLevel(logging.ERROR)
+
+logger.info(f"TP_MULTIPLIER1={TP_MULTIPLIER1}, TP_MULTIPLIER2={TP_MULTIPLIER2}")
 
 # ================== Borsa & Bot ==================
 exchange = ccxt.bybit({
@@ -361,7 +371,7 @@ def save_state():
 
 signal_cache = load_state()
 
-# ================== Util & Indikatörler ==================
+# ================== Util ==================
 def _safe_tz():
     try:
         return pytz.timezone(DEFAULT_TZ)
@@ -386,6 +396,11 @@ def fmt_sym(symbol, x):
         return exchange.price_to_precision(symbol, float(x))
     except Exception:
         return f"{float(x):.6f}"
+
+def bars_since(mask: pd.Series, idx: int = -2) -> int:
+    s = mask.iloc[: idx + 1]
+    rev = s.values[::-1]
+    return int(np.argmax(rev)) if rev.any() else len(rev)
 
 def format_signal_msg(symbol: str, timeframe: str, side: str,
                      entry: float, sl: float, tp1: float, tp2: float | None,
@@ -461,6 +476,22 @@ def apply_split_to_state(state: dict, plan: dict):
     state['tp2_pct'] = plan.get('tp2_pct', 0.0) or 0.0
     state['rest_pct'] = plan['rest_pct']
     state['plan_desc'] = plan['desc']
+
+def build_reason_text(side: str, cross_up_1334: bool, cross_dn_1334: bool, grace_long: bool, grace_short: bool, structL: bool, structS: bool, obL_ok: bool, obS_ok: bool, dip_recent: bool, top_recent: bool) -> str:
+    tags = []
+    if side == "buy":
+        if cross_up_1334: tags.append("EMA 13/34 Cross (Up)")
+        if grace_long: tags.append("Grace (LBG)")
+        if structL: tags.append("BOS Long")
+        if obL_ok: tags.append("Order Block Long")
+        if dip_recent: tags.append("Dip onaylı")
+    else:
+        if cross_dn_1334: tags.append("EMA 13/34 Cross (Down)")
+        if grace_short: tags.append("Grace (LBG)")
+        if structS: tags.append("BOS Short")
+        if obS_ok: tags.append("Order Block Short")
+        if top_recent: tags.append("Tepe onaylı")
+    return " + ".join(tags) if tags else "N/A"
 
 def get_regime_bucket(adx_last: float) -> str:
     if np.isfinite(adx_last):
@@ -1147,6 +1178,9 @@ async def check_signals(symbol: str, timeframe: str = '4h') -> None:
             await mark_status(symbol, "cooldown", "new_symbol_cooldown")
             return
 
+        if TEST_MODE:
+             pass # Eski random data kodunu kaldırdım, gerçek veri kullansın
+
         limit_need = max(150, LOOKBACK_ATR + 80, ADX_PERIOD + 40)
         ohlcv = await fetch_ohlcv_async(symbol, timeframe, limit=limit_need)
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -1255,13 +1289,24 @@ async def check_signals(symbol: str, timeframe: str = '4h') -> None:
         slope_thr = REGIME1_SLOPE_THR_PCT / 100.0
 
         e13 = df['ema13']; e34 = df['ema34']
+        e13_prev, e34_prev = e13.iloc[-3], e34.iloc[-3]
+        e13_last, e34_last = e13.iloc[-2], e34.iloc[-2]
+        
+        # --- HATA DÜZELTME: Bu tanımları tutmalıyız ki log listesi çökmesin ---
+        cross_up_1334 = (pd.notna(e13_prev) and pd.notna(e34_prev) and pd.notna(e13_last) and pd.notna(e34_last)
+                         and (e13_prev <= e34_prev) and (e13_last > e34_last))
+        cross_dn_1334 = (pd.notna(e13_prev) and pd.notna(e34_prev) and pd.notna(e13_last) and pd.notna(e34_last)
+                         and (e13_prev >= e34_prev) and (e13_last < e34_last))
+        
         cross_up_series = (e13.shift(1) <= e34.shift(1)) & (e13 > e34)
         cross_dn_series = (e13.shift(1) >= e34.shift(1)) & (e13 < e34)
         idx_lastbar = len(df) - 2
         idx_up = _last_true_index(cross_up_series, idx_lastbar)
         idx_dn = _last_true_index(cross_dn_series, idx_lastbar)
 
-        # === YENİ LBG (Local Breakout Grace) MANTIĞI ===
+        # === YENİ SİSTEM: GRACE LBG (Local Breakout) ===
+        # ESKİ KOD SİLİNDİ, YENİSİ MONTE EDİLDİ
+        
         grace_long = False
         if idx_up >= 0:
             bars_since = idx_lastbar - idx_up
@@ -1286,6 +1331,8 @@ async def check_signals(symbol: str, timeframe: str = '4h') -> None:
 
         allow_long = grace_long
         allow_short = grace_short
+        
+        # ... (Kodun geri kalanı 2100. satıra kadar aynı devam ediyor) ...
         structL, structS = False, False
 
         buy_classic = (allow_long and smi_open_green and is_green and okL and fk_ok_L and long_band_ok and (pct_slope > slope_thr))
@@ -1315,36 +1362,33 @@ async def check_signals(symbol: str, timeframe: str = '4h') -> None:
                 else: reason = "EMA Cross + Local Break"
             else: reason = "N/A"
 
-        # === ESKİ GENİŞ RAPORLAMA LİSTESİ (GERİ GETİRİLDİ) ===
         criteria = [
-            ("cross_up_1334", cross_up_1334),       # Kesişim var mı?
+            ("cross_up_1334", cross_up_1334),
             ("cross_dn_1334", cross_dn_1334),
-            ("reg1_long_band_ok", long_band_ok),    # EMA Bandı üzerinde mi?
+            ("reg1_long_band_ok", long_band_ok),
             ("reg1_short_band_ok", short_band_ok),
-            ("reg1_slope_pos", pct_slope > slope_thr), # Eğim yeterli mi?
+            ("reg1_slope_pos", pct_slope > slope_thr),
             ("reg1_slope_neg", pct_slope < -slope_thr),
-            ("grace_long", grace_long),             # YENİ: Local Breakout onayı var mı?
+            ("grace_long", grace_long),
             ("grace_short", grace_short),
-            ("smi_open_green", smi_open_green),     # SMI rengi
+            ("smi_open_green", smi_open_green),
             ("smi_open_red", smi_open_red),
-            ("fk_long", fk_ok_L),                   # Fake Filter (Hacim/Fitil)
+            ("fk_long", fk_ok_L),
             ("fk_short", fk_ok_S),
-            ("is_green", is_green),                 # Mum rengi
+            ("is_green", is_green),
             ("is_red", is_red),
-            ("allow_long", allow_long),             # Grace'ten geçti mi?
+            ("allow_long", allow_long),
             ("allow_short", allow_short),
-            ("order_block_long", obL_ok),           # OB var mı?
+            ("order_block_long", obL_ok),
             ("order_block_short", obS_ok),
-            ("ob_buy_trend_ok", obL_trend_ok),      # OB Trend filtresi
+            ("ob_buy_trend_ok", obL_trend_ok),
             ("ob_sell_trend_ok", obS_trend_ok),
-            ("sqz_long", sqzL_ok),                  # Squeeze
+            ("sqz_long", sqzL_ok),
             ("sqz_short", sqzS_ok),
         ]
-        
         await record_crit_batch(criteria)
 
         if buy_condition and sell_condition:
-            # Conflict resolution
             new_symbol_until[symbol] = now + timedelta(minutes=NEW_SYMBOL_COOLDOWN_MIN)
             await mark_status(symbol, "skip", "conflict")
             return
@@ -1440,7 +1484,7 @@ async def check_signals(symbol: str, timeframe: str = '4h') -> None:
                     await enqueue_message(format_signal_msg(symbol, timeframe, "sell", entry_price, sl_price, tp1_price, tp2_price, reason))
                     save_state()
 
-        # Exit/TP logic
+        # Exit/TP logic (Simplified for brevity - keeps existing positions managed)
         if current_pos['signal'] == 'buy':
             current_price = float(df['close'].iloc[-1])
             if exit_long:
@@ -1471,7 +1515,7 @@ async def main():
         for s in (signal.SIGINT, signal.SIGTERM): loop.add_signal_handler(s, _handle_stop)
     except NotImplementedError: pass
     asyncio.create_task(message_sender())
-    if STARTUP_MSG_ENABLED: await enqueue_message("TEST BOT BAŞLATILDI! (LBG + FullLogs) 🚀")
+    if STARTUP_MSG_ENABLED: await enqueue_message("TEST BOT BAŞLATILDI! (LBG + FullCode) 🚀")
     await load_markets()
     while not _stop.is_set():
         try:
