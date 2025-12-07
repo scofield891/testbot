@@ -1672,12 +1672,15 @@ async def check_signals(symbol: str, timeframe: str = '4h') -> None:
             top_gate_ok = bool(top_ok) # short için AND
         # --- EMA Classic gate (EMA Cross/Grace + kalite + trend bandı + RR) ---
         buy_classic = (
-            allow_long and smi_open_green and is_green and okL and
-            fk_ok_L and long_band_ok and (pct_slope > slope_thr)
+            allow_long
+            and smi_open_green and is_green
+            and okL and fk_ok_L
         )
+
         sell_classic = (
-            allow_short and smi_open_red and is_red and okS and
-            fk_ok_S and short_band_ok and (pct_slope < -slope_thr)
+            allow_short
+            and smi_open_red and is_red
+            and okS and fk_ok_S
         )
         # === ÖNCELİK: OB > SQZ > EMA ===
         # 1) OB standalone
