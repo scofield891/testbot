@@ -1638,11 +1638,11 @@ async def check_signals(symbol: str, timeframe: str = '4h') -> None:
                     if 0 <= (idx_lastbar - lbg_long_idx) <= LBG_FILTER_BARS:
                         grace_long = True
                         if VERBOSE_LOG:
-                            logger.debug(
-                                f\"{symbol} {timeframe}: LBG LONG aktif "
-                                f\"(cross_idx={idx_up}, break_idx={lbg_long_idx}, "
-                                f\"ref_high={ref_high:.4f})\"
-                            )
+    logger.debug(
+        f"{symbol} {timeframe}: LBG LONG aktif "
+        f"(cross_idx={idx_up}, break_idx={lbg_long_idx}, "
+        f"ref_high={ref_high:.4f})"
+    )
 
         # --- SHORT LBG ---
         grace_short = False
@@ -1663,11 +1663,11 @@ async def check_signals(symbol: str, timeframe: str = '4h') -> None:
                     if 0 <= (idx_lastbar - lbg_short_idx) <= LBG_FILTER_BARS:
                         grace_short = True
                         if VERBOSE_LOG:
-                            logger.debug(
-                                f\"{symbol} {timeframe}: LBG SHORT aktif "
-                                f\"(cross_idx={idx_dn}, break_idx={lbg_short_idx}, "
-                                f\"ref_low={ref_low:.4f})\"
-                            )
+    logger.debug(
+        f"{symbol} {timeframe}: LBG SHORT aktif "
+        f"(cross_idx={idx_dn}, break_idx={lbg_short_idx}, "
+        f"ref_low={ref_low:.4f})"
+    )
 
         # EMA yön teyidi (13>34 sadece long, 13<34 sadece short)
         ema_aligned_long = pd.notna(e13_last) and pd.notna(e34_last) and (e13_last > e34_last)
