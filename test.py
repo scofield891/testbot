@@ -87,6 +87,7 @@ RECENCY_OPP_K = 2
 GRACE_BARS = 8
 GRACE_BACK_BARS   = 8   # LBG: cross mumu DAHİL geriye bakılacak bar sayısı
 GRACE_FORWARD_WIN = 12  # LBG: cross'tan sonra kırılım için beklenecek maksimum bar sayısı
+LBG_FILTER_BARS   = 2
 USE_GATE_V3 = True
 G3_BAND_K = 0.25
 G3_SLOPE_WIN = 5
@@ -1607,52 +1608,75 @@ async def check_signals(symbol: str, timeframe: str = '4h') -> None:
         cross_dn_1334 = (pd.notna(e13_prev) and pd.notna(e34_prev) and pd.notna(e13_last) and pd.notna(e34_last)
                          and (e13_prev >= e34_prev) and (e13_last < e34_last))
         # === LBG (Local Breakout Grace) – EMA13/34 Cross + Lokal Tepe/Dip Kırılımı ===
+                # === LBG (Local Breakout Grace) – Cross + Lokal Tepe/Dip kırılımı + Hybrid pencere ===
         cross_up_series = (e13.shift(1) <= e34.shift(1)) & (e13 > e34)
         cross_dn_series = (e13.shift(1) >= e34.shift(1)) & (e13 < e34)
         idx_lastbar = len(df) - 2
         idx_up = _last_true_index(cross_up_series, idx_lastbar)
         idx_dn = _last_true_index(cross_dn_series, idx_lastbar)
 
+        # --- LONG LBG ---
         grace_long = False
+        lbg_long_idx = None
         if idx_up >= 0:
-            bars_since = idx_lastbar - idx_up
-            if 0 < bars_since <= GRACE_FORWARD_WIN:
+            bars_since_cross = idx_lastbar - idx_up
+            # Kırılım aradığımız forward pencerenin içindeysek
+            if 0 < bars_since_cross <= GRACE_FORWARD_WIN:
                 # Cross mumu DAHİL, geriye dönük son GRACE_BACK_BARS barın EN YÜKSEK FİTİLİ
                 lookback_idx = max(0, idx_up - (GRACE_BACK_BARS - 1))
                 ref_high = df['high'].iloc[lookback_idx : idx_up + 1].max()
-                # Cross'tan SONRAKİ barlarda, ref_high'ın ÜSTÜNDE kapanış var mı?
-                check_range = df.iloc[idx_up + 1 : idx_lastbar + 1]
-                if not check_range.empty and (check_range['close'] > ref_high).any():
-                    grace_long = True
-                    if VERBOSE_LOG:
-                        logger.debug(
-                            f"{symbol} {timeframe}: LBG LONG aktif "
-                            f"(cross_idx={idx_up}, ref_high={ref_high:.4f})"
-                        )
 
+                # Cross'tan SONRAKİ barlarda, ref_high'ın ÜSTÜNDE kapanış yapan barları ara
+                rel_series = df['close'].iloc[idx_up + 1 : idx_lastbar + 1] > ref_high
+                if rel_series.any():
+                    # İlk kırılımın olduğu bar (relative index → absolute index)
+                    first_rel_idx = int(np.where(rel_series.to_numpy())[0][0])
+                    lbg_long_idx = (idx_up + 1) + first_rel_idx
+
+                    # LBG hybrid pencere: break mumu + LBG_FILTER_BARS
+                    # Yani idx_lastbar, lbg_long_idx ile lbg_long_idx + LBG_FILTER_BARS arasında olmalı
+                    if 0 <= (idx_lastbar - lbg_long_idx) <= LBG_FILTER_BARS:
+                        grace_long = True
+                        if VERBOSE_LOG:
+                            logger.debug(
+                                f\"{symbol} {timeframe}: LBG LONG aktif "
+                                f\"(cross_idx={idx_up}, break_idx={lbg_long_idx}, "
+                                f\"ref_high={ref_high:.4f})\"
+                            )
+
+        # --- SHORT LBG ---
         grace_short = False
+        lbg_short_idx = None
         if idx_dn >= 0:
-            bars_since = idx_lastbar - idx_dn
-            if 0 < bars_since <= GRACE_FORWARD_WIN:
+            bars_since_cross = idx_lastbar - idx_dn
+            if 0 < bars_since_cross <= GRACE_FORWARD_WIN:
                 # Cross mumu DAHİL, geriye dönük son GRACE_BACK_BARS barın EN DÜŞÜK FİTİLİ
                 lookback_idx = max(0, idx_dn - (GRACE_BACK_BARS - 1))
                 ref_low = df['low'].iloc[lookback_idx : idx_dn + 1].min()
-                # Cross'tan SONRAKİ barlarda, ref_low'un ALTINDA kapanış var mı?
-                check_range = df.iloc[idx_dn + 1 : idx_lastbar + 1]
-                if not check_range.empty and (check_range['close'] < ref_low).any():
-                    grace_short = True
-                    if VERBOSE_LOG:
-                        logger.debug(
-                            f"{symbol} {timeframe}: LBG SHORT aktif "
-                            f"(cross_idx={idx_dn}, ref_low={ref_low:.4f})"
-                        )
 
-        # EMA sinyali için artık SADECE bu teyitli grace kullanılsın
+                # Cross'tan SONRAKİ barlarda, ref_low'un ALTINDA kapanış yapan barları ara
+                rel_series = df['close'].iloc[idx_dn + 1 : idx_lastbar + 1] < ref_low
+                if rel_series.any():
+                    first_rel_idx = int(np.where(rel_series.to_numpy())[0][0])
+                    lbg_short_idx = (idx_dn + 1) + first_rel_idx
+
+                    if 0 <= (idx_lastbar - lbg_short_idx) <= LBG_FILTER_BARS:
+                        grace_short = True
+                        if VERBOSE_LOG:
+                            logger.debug(
+                                f\"{symbol} {timeframe}: LBG SHORT aktif "
+                                f\"(cross_idx={idx_dn}, break_idx={lbg_short_idx}, "
+                                f\"ref_low={ref_low:.4f})\"
+                            )
+
+        # EMA yön teyidi (13>34 sadece long, 13<34 sadece short)
         ema_aligned_long = pd.notna(e13_last) and pd.notna(e34_last) and (e13_last > e34_last)
         ema_aligned_short = pd.notna(e13_last) and pd.notna(e34_last) and (e13_last < e34_last)
 
+        # Son karar: LBG + EMA yönü penceresi içinde mi?
         allow_long = grace_long and ema_aligned_long
         allow_short = grace_short and ema_aligned_short
+
 
         structL, structS = False, False
         entry_price_c = float(df['close'].iloc[-2])
