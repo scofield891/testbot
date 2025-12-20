@@ -243,6 +243,7 @@ class MinimalInfoFilter(logging.Filter):
         return (
             msg.startswith("Shard ") or
             msg.startswith(" (veri yok)") or
+            msg.startswith("Kriter FALSE dökümü") or
             msg.startswith(" - ")
         )
 for h in logger.handlers:
@@ -250,6 +251,35 @@ for h in logger.handlers:
 
 logging.getLogger('telegram').setLevel(logging.ERROR)
 logging.getLogger('httpx').setLevel(logging.ERROR)
+
+
+# ================== Kriter İstatistikleri ==================
+class CriteriaCounter:
+    """Her turda kriterlerin kaç kez FALSE döndüğünü raporlamak için."""
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.reset()
+
+    def reset(self):
+        with self._lock:
+            self.stats: Dict[str, List[int]] = {}  # name -> [false_count, total_count]
+
+    def record(self, name: str, passed: bool):
+        with self._lock:
+            if name not in self.stats:
+                self.stats[name] = [0, 0]
+            self.stats[name][1] += 1
+            if not passed:
+                self.stats[name][0] += 1
+
+    def report(self):
+        with self._lock:
+            items = [(k, v[0], v[1]) for k, v in self.stats.items() if v[1] > 0]
+        # false oranı yüksekten düşüğe, sonra false sayısı
+        items.sort(key=lambda x: (x[1] / x[2], x[1]), reverse=True)
+        return items
+
+criteria = CriteriaCounter()
 
 # ================== Borsa ==================
 exchange = ccxt.bybit({
@@ -1056,7 +1086,7 @@ def format_signal(symbol: str, timeframe: str, side: str, df: pd.DataFrame, plan
         f"TP2: {_fmt_price(tp2)}",
         f"Tarih: {date_str}",
     ]
-    return "\n".join(lines)
+    return "\n".join
 # =====================
 # LTF CONFIRM (4H -> 2H SQZ COLOR CONFIRM)
 # =====================
@@ -1133,13 +1163,19 @@ async def ltf_sqz_confirm(symbol: str, bar_open_ts_4h: int, side: str) -> bool:
     except Exception as e:
         logger.debug(f"[LTF_CONFIRM_ERR] {symbol}: {e.__class__.__name__}")
         return False
+
+
+
 async def check_signals(symbol: str, timeframe: str = '4h'):
     key = f"{symbol}|{timeframe}"
     st = state_map.get(key, PosState())
 
     # cooldown (Fetch'i boşuna yapmamak için: sadece "iki yön" modunda en başta kes)
     now_ts = time.time()
+    criteria.record('cooldown_both_pass', True)
+    criteria.record('cooldown_both_pass', False)
     if APPLY_COOLDOWN_BOTH_DIRECTIONS and now_ts < st.cooldown_until:
+        criteria.record('cooldown_both_pass', False)
         return
 
     # fetch
@@ -1150,7 +1186,10 @@ async def check_signals(symbol: str, timeframe: str = '4h'):
         return
 
     if not data or len(data) < MIN_BARS:
+        criteria.record('ohlcv_ok', False)
         return
+
+    criteria.record('ohlcv_ok', True)
 
     df = pd.DataFrame(data, columns=["timestamp","open","high","low","close","volume"])
     df["timestamp"] = df["timestamp"].astype(int)
@@ -1168,9 +1207,14 @@ async def check_signals(symbol: str, timeframe: str = '4h'):
     if st.last_bar_ts == bar_ts:
         return
 
+    criteria.record('new_bar', st.last_bar_ts != bar_ts)
+    if st.last_bar_ts == bar_ts:
+        return
+
     # Volume filter (opsiyonel)
     if USE_VOLUME_FILTER:
         ok, reason = simple_volume_ok(df)
+        criteria.record('volume_ok', bool(ok))
         if not ok:
             if VERBOSE_LOG:
                 logger.debug(f"[VOL_REJECT] {symbol} {timeframe} | {reason}")
@@ -1182,11 +1226,37 @@ async def check_signals(symbol: str, timeframe: str = '4h'):
     cross_long = bool(df["tce_score_cross_up"].iloc[-2]) if "tce_score_cross_up" in df.columns else False
     cross_short = bool(df["tce_score_cross_dn"].iloc[-2]) if "tce_score_cross_dn" in df.columns else False
 
+
+    # detay kriterler (confirmed bar = -2)
+    try:
+        last = df.iloc[-2]
+        thr = float(TCE_SCORE_THRESHOLD)
+        tL = safe_float(last.get("tce_total_long", np.nan), np.nan)
+        tS = safe_float(last.get("tce_total_short", np.nan), np.nan)
+        criteria.record("score_ge_thr_long", bool(np.isfinite(tL) and tL >= thr))
+        criteria.record("score_ge_thr_short", bool(np.isfinite(tS) and tS >= thr))
+        criteria.record("decision_ok_long", bool(last.get("tce_decision_ok_long", False)))
+        criteria.record("decision_ok_short", bool(last.get("tce_decision_ok_short", False)))
+        criteria.record("sqz_pass_long", bool(last.get("tce_sqz_pass_long", True)))
+        criteria.record("sqz_pass_short", bool(last.get("tce_sqz_pass_short", True)))
+        criteria.record("adx_pass", bool(last.get("tce_adx_pass", True)) if "tce_adx_pass" in df.columns else True)
+        criteria.record("pinbar_ok_long", not bool(last.get("tce_pin_bear", False)))
+        criteria.record("pinbar_ok_short", not bool(last.get("tce_pin_bull", False)))
+    except Exception:
+        pass
+
+    criteria.record("cross_long", cross_long)
+    criteria.record("cross_short", cross_short)
+
+
     # Aynı mumda hem LONG hem SHORT => pas geç
+    criteria.record('dual_cross_ok', not (cross_long and cross_short))
     if cross_long and cross_short:
         st.last_bar_ts = bar_ts
         state_map[key] = st
         return
+
+    criteria.record('either_cross', bool(cross_long or cross_short))
 
     if not (cross_long or cross_short):
         # sadece bar işaretle
@@ -1197,12 +1267,16 @@ async def check_signals(symbol: str, timeframe: str = '4h'):
     side = "LONG" if cross_long else "SHORT"
 
     # cooldown (yön bazlı)
-    if (not APPLY_COOLDOWN_BOTH_DIRECTIONS) and (st.last_side == side) and (now_ts < st.cooldown_until):
+    dir_cooldown_ok = not ((not APPLY_COOLDOWN_BOTH_DIRECTIONS) and (st.last_side == side) and (now_ts < st.cooldown_until))
+    criteria.record('cooldown_dir_pass', dir_cooldown_ok)
+    if not dir_cooldown_ok:
         return
 
 
     # --- LTF teyit (4H sinyali için 2H SQZ rengi) ---
-    if not await ltf_sqz_confirm(symbol, bar_ts, side):
+    ltf_ok = await ltf_sqz_confirm(symbol, bar_ts, side)
+    criteria.record(f"ltf_confirm_{side.lower()}", bool(ltf_ok))
+    if not ltf_ok:
         if VERBOSE_LOG:
             logger.debug(f"[LTF_CONFIRM_REJECT] {symbol} {timeframe} | side={side}")
         st.last_bar_ts = bar_ts
@@ -1214,6 +1288,9 @@ async def check_signals(symbol: str, timeframe: str = '4h'):
     if TP_SL_ENABLED:
         try:
             plan = compute_tp_sl_plan(df, side)
+            if USE_TP_SL_GUARD and plan is not None:
+                criteria.record('tp_sl_guard_ok', bool(plan.get('guard_ok', True)))
+            
             if USE_TP_SL_GUARD and plan is not None and not plan.get("guard_ok", True):
                 if VERBOSE_LOG:
                     logger.debug(f"[TP_SL_GUARD_REJECT] {symbol} {timeframe} | {plan.get('guard_reason','')}")
@@ -1225,6 +1302,7 @@ async def check_signals(symbol: str, timeframe: str = '4h'):
             plan = None
 
     # mesaj
+    criteria.record('signal_sent', True)
     msg = format_signal(symbol, timeframe, side, df, plan=plan)
     await enqueue_message(msg)
 
@@ -1269,6 +1347,8 @@ async def main():
             random.shuffle(symbols)
             shards = [symbols[i::N_SHARDS] for i in range(N_SHARDS)]
 
+
+            criteria.reset()
             for i, shard in enumerate(shards, start=1):
                 logger.info(f"Shard {i}/{len(shards)} -> {len(shard)} sembol taranacak")
                 # shard'ı batch batch tara (RAM/CPU daha stabil)
@@ -1277,6 +1357,15 @@ async def main():
                     tasks = [check_signals(symbol, timeframe='4h') for symbol in batch]
                     await asyncio.gather(*tasks, return_exceptions=True)
                     await asyncio.sleep(INTER_BATCH_SLEEP)
+
+            
+            # ---- Kriter FALSE dökümü (tur özeti) ----
+            items = criteria.report()
+            if items:
+                logger.info("Kriter FALSE dökümü (yüksekten düşüğe):")
+                for name, false_cnt, total_cnt in items:
+                    pct = (false_cnt / total_cnt * 100.0) if total_cnt else 0.0
+                    logger.info(f" - {name}: {false_cnt}/{total_cnt} ({pct:.1f}%)")
 
             save_state()
             await asyncio.sleep(SCAN_PAUSE_SEC)
