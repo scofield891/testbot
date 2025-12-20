@@ -1056,7 +1056,7 @@ def format_signal(symbol: str, timeframe: str, side: str, df: pd.DataFrame, plan
         f"TP2: {_fmt_price(tp2)}",
         f"Tarih: {date_str}",
     ]
-    return "\n".join
+    return "\n".join(lines)
 # =====================
 # LTF CONFIRM (4H -> 2H SQZ COLOR CONFIRM)
 # =====================
@@ -1133,11 +1133,6 @@ async def ltf_sqz_confirm(symbol: str, bar_open_ts_4h: int, side: str) -> bool:
     except Exception as e:
         logger.debug(f"[LTF_CONFIRM_ERR] {symbol}: {e.__class__.__name__}")
         return False
-
-
-(lines)
-
-
 async def check_signals(symbol: str, timeframe: str = '4h'):
     key = f"{symbol}|{timeframe}"
     st = state_map.get(key, PosState())
