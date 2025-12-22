@@ -33,7 +33,7 @@ CHAT_ID   = os.getenv("CHAT_ID")           # Telegram chat id (channel id ok)
 # ================== Genel Ayarlar ==================
 TEST_MODE = False
 STARTUP_MSG_ENABLED = True
-VERBOSE_LOG = True
+VERBOSE_LOG = False  # True yapılırsa her API çağrısı loglanır (çok gürültülü)
 
 # Zaman dilimi (TCE gate için)
 DEFAULT_TZ = os.getenv("BOT_TZ", "Europe/Istanbul")
@@ -270,6 +270,9 @@ for h in logger.handlers:
 
 logging.getLogger('telegram').setLevel(logging.ERROR)
 logging.getLogger('httpx').setLevel(logging.ERROR)
+logging.getLogger('ccxt').setLevel(logging.WARNING)
+logging.getLogger('urllib3').setLevel(logging.WARNING)
+logging.getLogger('requests').setLevel(logging.WARNING)
 
 
 # ================== Kriter İstatistikleri ==================
@@ -875,7 +878,9 @@ def _tce_scores(df: pd.DataFrame) -> None:
     body = np.abs((df["close"] - df["open"]).to_numpy(dtype=np.float64))
     uw = (df["high"] - np.maximum(df["open"], df["close"])).to_numpy(dtype=np.float64)
     lw = (np.minimum(df["open"], df["close"]) - df["low"]).to_numpy(dtype=np.float64)
-    closeLoc = np.where(rng > 0, (df["close"] - df["low"]).to_numpy(dtype=np.float64) / rng, 0.5)
+    # rng=0 durumunda divide by zero önle
+    rng_safe = np.where(rng > 0, rng, np.nan)
+    closeLoc = np.where(rng > 0, (df["close"] - df["low"]).to_numpy(dtype=np.float64) / rng_safe, 0.5)
 
     wickMin = float(TCE_PIN_WICK_MIN)
     bodyMax = float(TCE_PIN_BODY_MAX)
@@ -888,8 +893,8 @@ def _tce_scores(df: pd.DataFrame) -> None:
         closeMax = float(clamp(closeMax + 0.05, 0.05, 0.95))
 
     usePB = bool(TCE_USE_PINBAR_VETO)
-    bearPinbar = usePB & (rng > 0) & ((uw / np.where(rng == 0, np.nan, rng)) >= wickMin) & ((body / np.where(rng == 0, np.nan, rng)) <= bodyMax) & (closeLoc <= closeMax)
-    bullPinbar = usePB & (rng > 0) & ((lw / np.where(rng == 0, np.nan, rng)) >= wickMin) & ((body / np.where(rng == 0, np.nan, rng)) <= bodyMax) & (closeLoc >= (1.0 - closeMax))
+    bearPinbar = usePB & (rng > 0) & ((uw / rng_safe) >= wickMin) & ((body / rng_safe) <= bodyMax) & (closeLoc <= closeMax)
+    bullPinbar = usePB & (rng > 0) & ((lw / rng_safe) >= wickMin) & ((body / rng_safe) <= bodyMax) & (closeLoc >= (1.0 - closeMax))
 
     df["tce_pin_bear"] = bearPinbar.astype(bool)
     df["tce_pin_bull"] = bullPinbar.astype(bool)
@@ -1335,10 +1340,14 @@ async def check_signals(symbol: str, timeframe: str = '4h'):
     # Bar timestamp (confirmed bar = -2)
     bar_ts = int(df["timestamp"].iloc[-2])
 
-    # NOT: new_bar kontrolü KALDIRILDI
-    # Spam koruması cooldown ile yapılıyor (senin eski kodundaki gibi)
-    # Her taramada sinyal koşulları kontrol edilir, cooldown varsa mesaj atılmaz
-    criteria.record('new_bar', True)  # her zaman True (artık bloklamıyor)
+    # SPAM KORUMASI: Aynı bar için sinyal zaten attıysak tekrar atma
+    # last_bar_ts = son sinyal atılan barın timestamp'i
+    # Eğer aynı bar ise VE daha önce sinyal attıysak -> atla
+    already_signaled_this_bar = (st.last_bar_ts == bar_ts) and (st.last_signal_ts > 0)
+    criteria.record('new_bar', not already_signaled_this_bar)
+    
+    if already_signaled_this_bar:
+        return  # Bu bar için zaten sinyal attık, tekrar atma
 
     # Volume filter (opsiyonel)
     if USE_VOLUME_FILTER:
