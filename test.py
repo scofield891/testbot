@@ -862,8 +862,13 @@ def _tce_scores(df: pd.DataFrame) -> None:
 
     sqzMode = (TCE_SQZ_MODE or "Soft").strip()
     sqzUsed = sqzMode.lower() != "off"
-    sqzPassL = (~sqzUsed) | sqzLime_long
-    sqzPassS = (~sqzUsed) | sqzLime_short
+    # SQZ kapalıysa tüm barlar pass, açıksa sadece doğru renk pass
+    if not sqzUsed:
+        sqzPassL = pd.Series(True, index=df.index)
+        sqzPassS = pd.Series(True, index=df.index)
+    else:
+        sqzPassL = sqzLime_long
+        sqzPassS = sqzLime_short
 
     # --- Pinbar veto (bear for long, bull for short)
     rng = (df["high"] - df["low"]).to_numpy(dtype=np.float64)
