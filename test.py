@@ -91,7 +91,7 @@ def r_tp_plan(mode: str, is_ob: bool, R: float) -> dict:
         return dict(tp1_mult=1.0, tp2_mult=2.0, tp1_pct=0.30, tp2_pct=0.30, rest_pct=0.40, desc="trend")
     return dict(tp1_mult=0.8, tp2_mult=1.2, tp1_pct=0.40, tp2_pct=0.30, rest_pct=0.30, desc="range")
 
-def r_plan_guards_ok(mode: str, R: float, atr: float, entry: float, tp1_price: float, *, is_ob: bool = False) -> (bool, str):
+def r_plan_guards_ok(mode: str, R: float, atr: float, entry: float, tp1_price: float, *, is_ob: bool = False) -> Tuple[bool, str]:
     """RR guard: R/ATR eşiği.
     - Trend: R/ATR >= 1.00
     - Range: R/ATR >= 0.90
@@ -1172,17 +1172,17 @@ async def check_signals(symbol: str, timeframe: str = '4h'):
 
     # cooldown (Fetch'i boşuna yapmamak için: sadece "iki yön" modunda en başta kes)
     now_ts = time.time()
-    criteria.record('cooldown_both_pass', True)
-    criteria.record('cooldown_both_pass', False)
     if APPLY_COOLDOWN_BOTH_DIRECTIONS and now_ts < st.cooldown_until:
         criteria.record('cooldown_both_pass', False)
         return
+    criteria.record('cooldown_both_pass', True)
 
     # fetch
     try:
         data = await fetch_ohlcv_async(symbol, timeframe, max(MIN_BARS, 250))
     except Exception as e:
         logger.debug(f" (veri yok) {symbol} {timeframe}: {e.__class__.__name__}")
+        criteria.record('ohlcv_ok', False)
         return
 
     if not data or len(data) < MIN_BARS:
@@ -1205,11 +1205,9 @@ async def check_signals(symbol: str, timeframe: str = '4h'):
 
     # Aynı kapanmış mumu tekrar işleme (restart / tekrar tarama spam'ini keser)
     if st.last_bar_ts == bar_ts:
+        criteria.record('new_bar', False)
         return
-
-    criteria.record('new_bar', st.last_bar_ts != bar_ts)
-    if st.last_bar_ts == bar_ts:
-        return
+    criteria.record('new_bar', True)
 
     # Volume filter (opsiyonel)
     if USE_VOLUME_FILTER:
@@ -1384,8 +1382,10 @@ async def main():
 
     sender_task.cancel()
     try:
-        if getattr(exchange, "session", None):
-            exchange.session.close()
+        if hasattr(exchange, 'close'):
+            await asyncio.to_thread(exchange.close)
+        elif getattr(exchange, "session", None):
+            await asyncio.to_thread(exchange.session.close)
     except Exception:
         pass
     if telegram_bot:
