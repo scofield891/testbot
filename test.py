@@ -92,20 +92,33 @@ def r_tp_plan(mode: str, is_ob: bool, R: float) -> dict:
     return dict(tp1_mult=0.8, tp2_mult=1.2, tp1_pct=0.40, tp2_pct=0.30, rest_pct=0.30, desc="range")
 
 def r_plan_guards_ok(mode: str, R: float, atr: float, entry: float, tp1_price: float, *, is_ob: bool = False) -> Tuple[bool, str]:
-    """RR guard: R/ATR eşiği.
-    - Trend: R/ATR >= 1.00
-    - Range: R/ATR >= 0.90
-    - OB: R/ATR >= 0.80
+    """RR guard: TP1 mesafesi / ATR kontrolü.
+    NOT: R = (SL_MULT + SL_BUFFER) * ATR olduğu için R/ATR sabit kalıyor.
+    Bu yüzden TP1 mesafesini ATR'ye oranlıyoruz (daha anlamlı filtre).
+    
+    - Trend: TP1/ATR >= 1.00 (en az 1 ATR kar hedefi)
+    - Range: TP1/ATR >= 0.70 (daha sıkı hedefler kabul)
+    - OB: TP1/ATR >= 0.60
     """
     if not all(map(np.isfinite, [R, atr, entry, tp1_price])) or atr <= 0 or R <= 0:
         return False, "nan"
-    r_over_atr = R / atr
+    
+    tp1_dist = abs(tp1_price - entry)
+    tp1_over_atr = tp1_dist / atr
+    
     if is_ob:
-        r_min = 0.80
+        tp1_min = 0.60
     else:
-        r_min = 1.00 if mode == "trend" else 0.90
-    if r_over_atr < r_min:
-        return False, f"R/ATR<{r_min:.2f} (got {r_over_atr:.2f})"
+        tp1_min = 1.00 if mode == "trend" else 0.70
+    
+    if tp1_over_atr < tp1_min:
+        return False, f"TP1/ATR<{tp1_min:.2f} (got {tp1_over_atr:.2f})"
+    
+    # Ekstra: ATR çok düşükse (düşük volatilite) uyar
+    # Entry'nin %0.3'ünden düşük ATR = çok sıkışık piyasa
+    if atr < entry * 0.003:
+        return False, f"ATR_too_low ({atr:.6f} < {entry*0.003:.6f})"
+    
     return True, "ok"
 
 def _classic_sl_only(side: str, entry: float, atr: float) -> float:
@@ -229,7 +242,7 @@ MESSAGE_THROTTLE_SECS = float(os.getenv("MESSAGE_THROTTLE_SECS", "20.0"))
 # ================== Logging ==================
 logger = logging.getLogger()
 if not logger.handlers:
-    logger.setLevel(logging.INFO)
+    logger.setLevel(logging.DEBUG if VERBOSE_LOG else logging.INFO)
     fmt = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
 
     ch = logging.StreamHandler(sys.stdout); ch.setFormatter(fmt); logger.addHandler(ch)
@@ -244,7 +257,13 @@ class MinimalInfoFilter(logging.Filter):
             msg.startswith("Shard ") or
             msg.startswith(" (veri yok)") or
             msg.startswith("Kriter FALSE dökümü") or
-            msg.startswith(" - ")
+            msg.startswith(" - ") or
+            msg.startswith("OHLCV özeti:") or
+            msg.startswith("[OHLCV_") or
+            msg.startswith("CALLS_THIS_ROUND") or
+            msg.startswith("Cleanup") or
+            msg.startswith("Tur genel hatası:") or
+            "Bot başladı" in msg
         )
 for h in logger.handlers:
     h.addFilter(MinimalInfoFilter())
@@ -317,10 +336,20 @@ class PosState:
     cooldown_until: float = 0.0
 
 _state_lock = threading.Lock()
+_state_async_lock = asyncio.Lock()  # async race condition önleme
 state_map: Dict[str, PosState] = {}
 
 
 # ----------------- Utils -----------------
+def ohlcv_to_df(data) -> Optional[pd.DataFrame]:
+    """OHLCV listesini DataFrame'e çevir."""
+    if not data:
+        return None
+    df = pd.DataFrame(data, columns=["timestamp","open","high","low","close","volume"])
+    df["timestamp"] = df["timestamp"].astype(int)
+    df[["open","high","low","close","volume"]] = df[["open","high","low","close","volume"]].astype(float)
+    return df
+
 def clamp(x: float, lo: float, hi: float) -> float:
     return float(min(hi, max(lo, x)))
 
@@ -350,11 +379,26 @@ def load_state() -> None:
         logger.warning(f"State load failed: {e.__class__.__name__}: {e}")
 
 def save_state() -> None:
+    """Senkron save_state - sadece startup/shutdown için."""
     try:
         with _state_lock:
             raw = {k: vars(v) for k, v in state_map.items()}
         with open(STATE_FILE, "w", encoding="utf-8") as f:
             json.dump(raw, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.warning(f"State save failed: {e.__class__.__name__}: {e}")
+
+def _write_state_file(raw: dict):
+    """State dosyasını yaz (thread içinde çağrılır)."""
+    with open(STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(raw, f, ensure_ascii=False, indent=2)
+
+async def save_state_async() -> None:
+    """Async save_state - main loop için (async lock uyumlu)."""
+    try:
+        async with _state_async_lock:
+            raw = {k: vars(v) for k, v in state_map.items()}
+        await asyncio.to_thread(_write_state_file, raw)
     except Exception as e:
         logger.warning(f"State save failed: {e.__class__.__name__}: {e}")
 
@@ -434,11 +478,12 @@ async def fetch_ohlcv_async(symbol: str, timeframe: str, limit: int):
         try:
             async with _fetch_sem:
                 async with _rate_lock:
-                    now = asyncio.get_event_loop().time()
+                    loop = asyncio.get_running_loop()
+                    now = loop.time()
                     wait = max(0.0, (_last_call_ts + (base_ms + _rate_penalty_ms) / 1000.0) - now)
                     if wait > 0:
                         await asyncio.sleep(wait)
-                    _last_call_ts = asyncio.get_event_loop().time()
+                    _last_call_ts = loop.time()
 
                 data = await asyncio.to_thread(exchange.fetch_ohlcv, symbol, timeframe, None, limit)
 
@@ -485,14 +530,23 @@ def ema_np(closes: np.ndarray, span: int) -> np.ndarray:
     return out
 
 def rma_np(arr: np.ndarray, length: int) -> np.ndarray:
-    # Wilder RMA
+    """Wilder RMA - NaN-safe versiyon.
+    İlk eleman NaN ise 0 olarak başlar, böylece tüm seri NaN olmaz.
+    """
     out = np.full_like(arr, np.nan, dtype=np.float64)
     if length <= 0 or len(arr) == 0:
         return out
     alpha = 1.0 / length
-    out[0] = arr[0]
+    
+    # İlk eleman NaN ise 0 olarak başla
+    a0 = arr[0]
+    out[0] = a0 if np.isfinite(a0) else 0.0
+    
     for i in range(1, len(arr)):
-        out[i] = alpha * arr[i] + (1 - alpha) * out[i - 1]
+        v = arr[i]
+        if not np.isfinite(v):
+            v = 0.0
+        out[i] = alpha * v + (1 - alpha) * out[i - 1]
     return out
 
 def atr_np(high: np.ndarray, low: np.ndarray, close: np.ndarray, length: int = 14) -> np.ndarray:
@@ -570,11 +624,16 @@ def _tce_adx_pass(df: pd.DataFrame) -> pd.Series:
     adx_range    = 20.0 if prof_eff == "BIST" else 15.0
 
     adx_strong = df["tce_adx"] >= adx_thresh
-    adx_early = (
-        bool(TCE_ADX_EARLY)
-        and (df["tce_adx"] >= (adx_thresh - adx_earlybuf))
-        and (df["tce_adx"] > df["tce_adx"].shift(1))
-    )
+    
+    # FIX: Python 'and' ile Series kullanılamaz, '&' kullanılmalı
+    early_enabled = bool(TCE_ADX_EARLY)
+    if early_enabled:
+        adx_early = (
+            (df["tce_adx"] >= (adx_thresh - adx_earlybuf)) &
+            (df["tce_adx"] > df["tce_adx"].shift(1))
+        )
+    else:
+        adx_early = pd.Series(False, index=df.index)
 
     mode = (TCE_ADX_MODE or "Soft").strip().lower()
     if mode == "off":
@@ -793,11 +852,13 @@ def _tce_scores(df: pd.DataFrame) -> None:
     atrN = atr_np(high, low, close, int(TCE_ATR_LEN_NORM))
     df["tce_atrN"] = atrN
 
-    # --- SQZ pass (lime) + power
+    # --- SQZ pass (LazyBear renkleri) + power
+    # LONG için: Açık yeşil (mom > 0 ve artıyor)
+    # SHORT için: Açık kırmızı (mom < 0 ama artıyor = düşüş zayıflıyor)
     mom = df["tce_sqz_mom"].to_numpy(dtype=np.float64)
     mom_prev = np.roll(mom, 1); mom_prev[0] = np.nan
-    sqzLime_long = (mom > 0) & (mom > mom_prev)
-    sqzLime_short = (mom < 0) & (mom < mom_prev)
+    sqzLime_long = (mom > 0) & (mom > mom_prev)   # Açık yeşil
+    sqzLime_short = (mom < 0) & (mom > mom_prev)  # Açık kırmızı (düzeltildi!)
 
     sqzMode = (TCE_SQZ_MODE or "Soft").strip()
     sqzUsed = sqzMode.lower() != "off"
@@ -1079,10 +1140,13 @@ def format_signal(symbol: str, timeframe: str, side: str, df: pd.DataFrame, plan
     """Telegram formatı: kullanıcı şablonu (BUY/SELL + Entry/SL/TP1/TP2 + Tarih)."""
     last = df.iloc[-2]
 
-    # Tarih (Istanbul)
+    # Tarih (Istanbul) - mum KAPANIŞ tarihi
+    # ccxt timestamp = mum açılış zamanı, kapanış için timeframe ekle
     ts_ms = int(last.get("timestamp", 0))
-    dt = datetime.fromtimestamp(ts_ms / 1000, tz=ZoneInfo("UTC")).astimezone(ZoneInfo(DEFAULT_TZ))
-    date_str = dt.strftime("%d.%m.%Y")
+    tf_ms = _tf_to_ms(timeframe)  # 4h = 4*60*60*1000
+    close_ts_ms = ts_ms + tf_ms  # kapanış zamanı
+    dt = datetime.fromtimestamp(close_ts_ms / 1000, tz=ZoneInfo("UTC")).astimezone(ZoneInfo(DEFAULT_TZ))
+    date_str = dt.strftime("%d.%m.%Y %H:%M")
 
     if side == "LONG":
         head = f"{symbol} {timeframe}: BUY (LONG) 📈"
@@ -1107,7 +1171,7 @@ def format_signal(symbol: str, timeframe: str, side: str, df: pd.DataFrame, plan
         f"TP2: {_fmt_price(tp2)}",
         f"Tarih: {date_str}",
     ]
-    return "\n".join
+    return "\n".join(lines)
 # =====================
 # LTF CONFIRM (4H -> 2H SQZ COLOR CONFIRM)
 # =====================
@@ -1131,18 +1195,36 @@ def _tf_to_ms(tf: str) -> int:
         return n * 24 * 60 * 60 * 1000
     raise ValueError(f"Unsupported timeframe unit: {unit}")
 
+def _align_ts_floor(ts_ms: int, tf_ms: int) -> int:
+    """Timestamp'i timeframe grid'ine oturt (floor)."""
+    if tf_ms <= 0:
+        return int(ts_ms)
+    return int(ts_ms - (ts_ms % tf_ms))
+
 async def ltf_sqz_confirm(symbol: str, bar_open_ts_4h: int, side: str) -> bool:
     """4H sinyal mumunun kapanışına denk gelen 2H teyidi.
-    - LONG için: 2H SQZ 'açık yeşil' (mom>0 ve artıyor) olmalı
-    - SHORT için: 2H SQZ 'açık kırmızı' (mom<0 ve daha negatif) olmalı
-    Teyit mumu: bar_open_ts_4h + 2H (yani 4H mumunun ortasındaki 2H mum; close anında kapanır).
+    
+    LazyBear SQZ Momentum Renkleri:
+    - Açık Yeşil (Lime): mom > 0 VE mom > mom_prev (yükseliş momentumu artıyor)
+    - Koyu Yeşil: mom > 0 VE mom < mom_prev (yükseliş momentumu zayıflıyor)
+    - Açık Kırmızı: mom < 0 VE mom > mom_prev (düşüş momentumu zayıflıyor)
+    - Koyu Kırmızı: mom < 0 VE mom < mom_prev (düşüş momentumu artıyor)
+    
+    LONG için: Açık Yeşil (lime) gerekli
+    SHORT için: Açık Kırmızı gerekli
+    
+    Teyit mumu: bar_open_ts_4h + 2H (yani 4H mumunun ortasındaki 2H mum)
     """
     if not LTF_CONFIRM_ENABLED:
         return True
 
     try:
         tf_ms_2h = _tf_to_ms(LTF_CONFIRM_OFFSET_TF)
-        target_open_ts_2h = int(bar_open_ts_4h) + tf_ms_2h
+        tf_ms_4h = _tf_to_ms("4h")
+        
+        # Timestamp'leri grid'e oturt (yanlış mum seçimini önler)
+        bar_open_4h_aligned = _align_ts_floor(int(bar_open_ts_4h), tf_ms_4h)
+        target_open_ts_2h = _align_ts_floor(bar_open_4h_aligned + tf_ms_2h, tf_ms_2h)
     except Exception:
         return True  # timeframe parse fail -> block etme
 
@@ -1158,19 +1240,22 @@ async def ltf_sqz_confirm(symbol: str, bar_open_ts_4h: int, side: str) -> bool:
         mom_prev = np.roll(mom, 1)
         mom_prev[0] = np.nan
 
-        sqz_open_green = (mom > 0) & (mom > mom_prev)   # lime
-        sqz_open_red = (mom < 0) & (mom < mom_prev)     # red (daha negatif)
+        # LazyBear SQZ Momentum renkleri
+        sqz_open_green = (mom > 0) & (mom > mom_prev)   # Açık yeşil (lime) - LONG için
+        sqz_open_red = (mom < 0) & (mom > mom_prev)    # Açık kırmızı - SHORT için (düzeltildi!)
 
+        # Timestamp'leri grid'e hizala
         ts_arr = df2["timestamp"].to_numpy(dtype=np.int64)
+        ts_arr_aligned = (ts_arr - (ts_arr % tf_ms_2h)).astype(np.int64)
 
-        # target timestamp'i bul (tam eşleşme), yoksa en yakını al
-        idxs = np.where(ts_arr == target_open_ts_2h)[0]
+        # target timestamp'i bul (hizalanmış)
+        idxs = np.where(ts_arr_aligned == target_open_ts_2h)[0]
         if len(idxs) == 0:
-            # en yakın mumu seç
-            diffs = np.abs(ts_arr - target_open_ts_2h)
+            # en yakın mumu seç (hizalanmış array ile)
+            diffs = np.abs(ts_arr_aligned - target_open_ts_2h)
             j = int(np.argmin(diffs))
             # 2H mum genişliğinin yarısından büyükse güvenme
-            if diffs[j] > int(tf_ms_2h * 0.51):
+            if diffs[j] > int(tf_ms_2h * 0.75):  # tolerans artırıldı (veri boşlukları için)
                 return False
             i = j
         else:
@@ -1187,13 +1272,31 @@ async def ltf_sqz_confirm(symbol: str, bar_open_ts_4h: int, side: str) -> bool:
 
 
 
-async def check_signals(symbol: str, timeframe: str = '4h'):
-    key = f"{symbol}|{timeframe}"
-    st = state_map.get(key, PosState())
+CALLS_THIS_ROUND = 0
 
-    # cooldown (Fetch'i boşuna yapmamak için: sadece "iki yön" modunda en başta kes)
+async def check_signals(symbol: str, timeframe: str = '4h'):
+    global CALLS_THIS_ROUND
+    CALLS_THIS_ROUND += 1
+    
+    key = f"{symbol}|{timeframe}"
+    
+    # State okuma (lock ile)
+    async with _state_async_lock:
+        st = state_map.get(key, PosState())
+
+    # cooldown (iki yön) — gecikmeli sinyal olmasın diye bar'ı "consume" et
     now_ts = time.time()
     if APPLY_COOLDOWN_BOTH_DIRECTIONS and now_ts < st.cooldown_until:
+        # Küçük fetch ile bar timestamp'ini güncelle (gecikmeli sinyal önleme)
+        try:
+            data_small = await fetch_ohlcv_async(symbol, timeframe, 3)
+            if data_small and len(data_small) >= 2:
+                bar_ts_small = int(data_small[-2][0])
+                st.last_bar_ts = bar_ts_small
+                async with _state_async_lock:
+                    state_map[key] = st
+        except Exception:
+            pass
         criteria.record('cooldown_both_pass', False)
         return
     criteria.record('cooldown_both_pass', True)
@@ -1242,7 +1345,8 @@ async def check_signals(symbol: str, timeframe: str = '4h'):
             if VERBOSE_LOG:
                 logger.debug(f"[VOL_REJECT] {symbol} {timeframe} | {reason}")
             st.last_bar_ts = bar_ts
-            state_map[key] = st
+            async with _state_async_lock:
+                state_map[key] = st
             return
     else:
         criteria.record('volume_ok', True)  # filtre kapalıysa her zaman True
@@ -1276,7 +1380,8 @@ async def check_signals(symbol: str, timeframe: str = '4h'):
     
     if dual_cross:
         st.last_bar_ts = bar_ts
-        state_map[key] = st
+        async with _state_async_lock:
+            state_map[key] = st
         return
 
     either_cross = cross_long or cross_short
@@ -1285,7 +1390,8 @@ async def check_signals(symbol: str, timeframe: str = '4h'):
     if not either_cross:
         # sadece bar işaretle
         st.last_bar_ts = bar_ts
-        state_map[key] = st
+        async with _state_async_lock:
+            state_map[key] = st
         return
 
     side = "LONG" if cross_long else "SHORT"
@@ -1299,7 +1405,8 @@ async def check_signals(symbol: str, timeframe: str = '4h'):
     criteria.record('cooldown_dir_pass', dir_cooldown_ok)
     if not dir_cooldown_ok:
         st.last_bar_ts = bar_ts
-        state_map[key] = st
+        async with _state_async_lock:
+            state_map[key] = st
         return
 
     # --- LTF teyit (4H sinyali için 2H SQZ rengi) ---
@@ -1309,7 +1416,8 @@ async def check_signals(symbol: str, timeframe: str = '4h'):
         if VERBOSE_LOG:
             logger.debug(f"[LTF_CONFIRM_REJECT] {symbol} {timeframe} | side={side}")
         st.last_bar_ts = bar_ts
-        state_map[key] = st
+        async with _state_async_lock:
+            state_map[key] = st
         return
 
     # --- TP/SL planı ---
@@ -1325,7 +1433,8 @@ async def check_signals(symbol: str, timeframe: str = '4h'):
                     if VERBOSE_LOG:
                         logger.debug(f"[TP_SL_GUARD_REJECT] {symbol} {timeframe} | {plan.get('guard_reason','')}")
                     st.last_bar_ts = bar_ts
-                    state_map[key] = st
+                    async with _state_async_lock:
+                        state_map[key] = st
                     return
         except Exception as e:
             logger.debug(f"[TP_SL_ERR] {symbol} {timeframe}: {e.__class__.__name__}")
@@ -1341,7 +1450,8 @@ async def check_signals(symbol: str, timeframe: str = '4h'):
     st.last_side = side
     st.last_bar_ts = bar_ts
     st.cooldown_until = now_ts + COOLDOWN_MINUTES * 60
-    state_map[key] = st
+    async with _state_async_lock:
+        state_map[key] = st
 
 # ================== Ana Döngü ==================
 _stop = asyncio.Event()
@@ -1368,6 +1478,9 @@ async def main():
 
     while not _stop.is_set():
         try:
+            global CALLS_THIS_ROUND
+            CALLS_THIS_ROUND = 0
+            
             symbols = await discover_bybit_symbols(LINEAR_ONLY, QUOTE_WHITELIST)
             if not symbols:
                 logger.error("Sembol listesi boş. Bybit markets yüklenemedi olabilir.")
@@ -1397,10 +1510,12 @@ async def main():
                     pct = (false_cnt / total_cnt * 100.0) if total_cnt else 0.0
                     logger.info(f" - {name}: {false_cnt}/{total_cnt} ({pct:.1f}%)")
             
-            # OHLCV özeti
+            # OHLCV ve çağrı özeti
             logger.info(f"OHLCV özeti: başarılı={_ohlcv_success_count}, başarısız={_ohlcv_fail_count}")
+            logger.info(f"CALLS_THIS_ROUND={CALLS_THIS_ROUND} symbols={len(symbols)}")
+            CALLS_THIS_ROUND = 0
 
-            save_state()
+            await save_state_async()
             await asyncio.sleep(SCAN_PAUSE_SEC)
 
         except asyncio.CancelledError:
@@ -1429,7 +1544,7 @@ async def main():
         except Exception:
             pass
 
-    save_state()
+    save_state()  # kapanışta senkron versiyon OK
     logger.info("Cleanup tamamlandı, bot kapatıldı.")
 
 if __name__ == "__main__":
