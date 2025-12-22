@@ -342,6 +342,16 @@ class PosState:
     short_breakout_active: bool = False  # SHORT kırılım oldu, sinyal hakkı var
     long_signal_given: bool = False      # Bu kırılımda LONG sinyal verildi mi
     short_signal_given: bool = False     # Bu kırılımda SHORT sinyal verildi mi
+    # Açık pozisyon takibi (EMA çıkış için)
+    position_open: bool = False          # Açık pozisyon var mı
+    position_side: str = ""              # "LONG" / "SHORT"
+    entry_price: float = 0.0             # Giriş fiyatı
+    sl_price: float = 0.0                # Stop loss fiyatı
+    tp1_price: float = 0.0               # TP1 fiyatı
+    tp2_price: float = 0.0               # TP2 fiyatı
+    tp1_hit: bool = False                # TP1 vuruldu mu
+    tp2_hit: bool = False                # TP2 vuruldu mu
+    remaining_pct: float = 100.0         # Kalan pozisyon yüzdesi
 
 _state_lock = threading.Lock()
 _state_async_lock = asyncio.Lock()  # async race condition önleme
@@ -1147,6 +1157,129 @@ def add_tce_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+# ================== EMA ÇIKIŞ SİSTEMİ ==================
+def add_ema_exit_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """EMA13/34 çıkış sinyalleri için kolonlar ekle."""
+    close = df["close"].to_numpy(dtype=np.float64)
+    
+    # EMA13 ve EMA34 hesapla
+    df["ema13"] = ema_np(close, 13)
+    df["ema34"] = ema_np(close, 34)
+    
+    # EMA kesişimleri
+    ema13 = df["ema13"].to_numpy()
+    ema34 = df["ema34"].to_numpy()
+    ema13_prev = np.roll(ema13, 1); ema13_prev[0] = np.nan
+    ema34_prev = np.roll(ema34, 1); ema34_prev[0] = np.nan
+    
+    # LONG çıkış: EMA13, EMA34'ü AŞAĞI kırdı
+    df["ema_exit_long"] = (ema13 < ema34) & (ema13_prev >= ema34_prev)
+    
+    # SHORT çıkış: EMA13, EMA34'ü YUKARI kırdı
+    df["ema_exit_short"] = (ema13 > ema34) & (ema13_prev <= ema34_prev)
+    
+    return df
+
+
+def check_ema_exit(df: pd.DataFrame, st: 'PosState') -> Tuple[bool, str, float]:
+    """
+    EMA13/34 çıkış kontrolü.
+    
+    Returns:
+        (should_exit, exit_reason, close_pct)
+        - should_exit: Çıkış yapılmalı mı
+        - exit_reason: Çıkış sebebi
+        - close_pct: Kapatılacak pozisyon yüzdesi (0-100)
+    """
+    if not st.position_open:
+        return False, "", 0.0
+    
+    # EMA kolonları yoksa ekle
+    if "ema13" not in df.columns:
+        df = add_ema_exit_columns(df)
+    
+    last = df.iloc[-2]  # Kapanmış bar
+    current_price = float(last["close"])
+    
+    # EMA kesişimi var mı?
+    if st.position_side == "LONG":
+        ema_cross = bool(last.get("ema_exit_long", False))
+    else:  # SHORT
+        ema_cross = bool(last.get("ema_exit_short", False))
+    
+    if not ema_cross:
+        return False, "", 0.0
+    
+    # EMA kesişimi var, fiyat nerede?
+    entry = st.entry_price
+    sl = st.sl_price
+    tp1 = st.tp1_price
+    tp2 = st.tp2_price
+    
+    if st.position_side == "LONG":
+        # LONG pozisyon
+        if current_price < sl:
+            # SL altında → %100 kapat (zarar kes)
+            return True, "EMA_EXIT_UNDER_SL", 100.0
+        elif current_price < entry:
+            # Entry-SL arası → %50 kapat, SL girişe çekilecek
+            return True, "EMA_EXIT_UNDER_ENTRY", 50.0
+        elif current_price < tp1:
+            # Entry-TP1 arası → %50 kapat, SL girişe çekilecek
+            return True, "EMA_EXIT_BEFORE_TP1", 50.0
+        else:
+            # TP1 üstü → %100 kapat (kârda çık)
+            return True, "EMA_EXIT_AFTER_TP1", 100.0
+    
+    else:  # SHORT
+        if current_price > sl:
+            # SL üstünde → %100 kapat (zarar kes)
+            return True, "EMA_EXIT_OVER_SL", 100.0
+        elif current_price > entry:
+            # Entry-SL arası → %50 kapat
+            return True, "EMA_EXIT_OVER_ENTRY", 50.0
+        elif current_price > tp1:
+            # Entry-TP1 arası → %50 kapat
+            return True, "EMA_EXIT_BEFORE_TP1", 50.0
+        else:
+            # TP1 altı → %100 kapat (kârda çık)
+            return True, "EMA_EXIT_AFTER_TP1", 100.0
+
+
+def check_tp_sl_hits(df: pd.DataFrame, st: 'PosState') -> Tuple[bool, str]:
+    """TP1, TP2, SL kontrolü."""
+    if not st.position_open:
+        return False, ""
+    
+    last = df.iloc[-2]
+    high = float(last["high"])
+    low = float(last["low"])
+    
+    if st.position_side == "LONG":
+        # SL kontrolü
+        if low <= st.sl_price:
+            return True, "SL_HIT"
+        # TP2 kontrolü (TP1'den sonra)
+        if st.tp1_hit and high >= st.tp2_price:
+            return True, "TP2_HIT"
+        # TP1 kontrolü
+        if not st.tp1_hit and high >= st.tp1_price:
+            return True, "TP1_HIT"
+    
+    else:  # SHORT
+        # SL kontrolü
+        if high >= st.sl_price:
+            return True, "SL_HIT"
+        # TP2 kontrolü (TP1'den sonra)
+        if st.tp1_hit and low <= st.tp2_price:
+            return True, "TP2_HIT"
+        # TP1 kontrolü
+        if not st.tp1_hit and low <= st.tp1_price:
+            return True, "TP1_HIT"
+    
+    return False, ""
+
+
 # ================== Sinyal üretimi ==================
 def _fmt_price(x: float) -> str:
     if not np.isfinite(x):
@@ -1352,9 +1485,20 @@ async def check_signals(symbol: str, timeframe: str = '4h'):
     if USE_VOLUME_FILTER:
         df = add_volume_columns(df)
     df = add_tce_columns(df)
+    
+    # EMA kolonları ekle (çıkış kontrolü için)
+    df = add_ema_exit_columns(df)
 
     # Bar timestamp (confirmed bar = -2)
     bar_ts = int(df["timestamp"].iloc[-2])
+
+    # ============ AÇIK POZİSYON ÇIKIŞ KONTROLÜ ============
+    # Önce açık pozisyon varsa TP/SL/EMA çıkış kontrolü yap
+    if st.position_open:
+        await check_position_exit(symbol, timeframe, df, st, key)
+        # State güncellendi, yeniden oku
+        async with _state_async_lock:
+            st = state_map.get(key, st)
 
     # SPAM KORUMASI: Aynı bar için sinyal zaten attıysak tekrar atma
     # last_bar_ts = son sinyal atılan barın timestamp'i
@@ -1550,8 +1694,132 @@ async def check_signals(symbol: str, timeframe: str = '4h'):
     else:
         st.short_signal_given = True
     
+    # Pozisyon aç (EMA çıkış takibi için)
+    st.position_open = True
+    st.position_side = side
+    st.entry_price = safe_float(df.iloc[-2]["close"], 0.0)
+    if plan:
+        st.sl_price = safe_float(plan.get("sl", 0), 0.0)
+        st.tp1_price = safe_float(plan.get("tp1", 0), 0.0)
+        st.tp2_price = safe_float(plan.get("tp2", 0), 0.0)
+    st.tp1_hit = False
+    st.tp2_hit = False
+    st.remaining_pct = 100.0
+    
     async with _state_async_lock:
         state_map[key] = st
+
+
+async def check_position_exit(symbol: str, timeframe: str, df: pd.DataFrame, st: 'PosState', key: str) -> bool:
+    """Açık pozisyon varsa TP/SL ve EMA çıkış kontrolü yap."""
+    if not st.position_open:
+        return False
+    
+    # EMA kolonları ekle
+    df = add_ema_exit_columns(df)
+    
+    current_price = float(df.iloc[-2]["close"])
+    
+    # Önce TP/SL kontrolü
+    tp_sl_hit, tp_sl_reason = check_tp_sl_hits(df, st)
+    
+    if tp_sl_hit:
+        if tp_sl_reason == "TP1_HIT":
+            # TP1 vuruldu - %30 kapat, SL girişe çek
+            profit_pct = abs(current_price - st.entry_price) / st.entry_price * 100
+            st.tp1_hit = True
+            st.remaining_pct = 70.0  # %30 kapandı
+            old_sl = st.sl_price
+            st.sl_price = st.entry_price  # SL girişe
+            
+            msg = (f"🎯 {symbol} {timeframe}: TP1 HIT!\n"
+                   f"Fiyat: {_fmt_price(current_price)}\n"
+                   f"P/L: +{profit_pct:.2f}%\n"
+                   f"%30 kapatıldı, SL girişe çekildi\n"
+                   f"Kalan: %{st.remaining_pct:.0f}")
+            await enqueue_message(msg)
+            
+            async with _state_async_lock:
+                state_map[key] = st
+            return False  # Pozisyon hala açık
+        
+        elif tp_sl_reason == "TP2_HIT":
+            # TP2 vuruldu - %30 daha kapat
+            profit_pct = abs(current_price - st.entry_price) / st.entry_price * 100
+            st.tp2_hit = True
+            st.remaining_pct = 40.0  # %30 daha kapandı
+            
+            msg = (f"🎯🎯 {symbol} {timeframe}: TP2 HIT!\n"
+                   f"Fiyat: {_fmt_price(current_price)}\n"
+                   f"P/L: +{profit_pct:.2f}%\n"
+                   f"%30 daha kapatıldı\n"
+                   f"Kalan: %{st.remaining_pct:.0f}")
+            await enqueue_message(msg)
+            
+            async with _state_async_lock:
+                state_map[key] = st
+            return False  # Pozisyon hala açık
+        
+        elif tp_sl_reason == "SL_HIT":
+            # SL vuruldu - tümünü kapat
+            if st.position_side == "LONG":
+                profit_pct = (current_price - st.entry_price) / st.entry_price * 100
+            else:
+                profit_pct = (st.entry_price - current_price) / st.entry_price * 100
+            
+            msg = (f"⛔ {symbol} {timeframe}: STOP LOSS!\n"
+                   f"Fiyat: {_fmt_price(current_price)}\n"
+                   f"P/L: {profit_pct:+.2f}%\n"
+                   f"Pozisyon kapatıldı")
+            await enqueue_message(msg)
+            
+            # Pozisyonu kapat
+            st.position_open = False
+            st.remaining_pct = 0.0
+            
+            async with _state_async_lock:
+                state_map[key] = st
+            return True
+    
+    # EMA çıkış kontrolü
+    ema_exit, ema_reason, close_pct = check_ema_exit(df, st)
+    
+    if ema_exit:
+        if st.position_side == "LONG":
+            profit_pct = (current_price - st.entry_price) / st.entry_price * 100
+        else:
+            profit_pct = (st.entry_price - current_price) / st.entry_price * 100
+        
+        if close_pct >= 100 or ema_reason in ["EMA_EXIT_UNDER_SL", "EMA_EXIT_OVER_SL"]:
+            # Tümünü kapat
+            msg = (f"🔄 {symbol} {timeframe}: EMA ÇIKIŞ\n"
+                   f"Sebep: {ema_reason}\n"
+                   f"Fiyat: {_fmt_price(current_price)}\n"
+                   f"P/L: {profit_pct:+.2f}%\n"
+                   f"Pozisyon kapatıldı")
+            await enqueue_message(msg)
+            
+            st.position_open = False
+            st.remaining_pct = 0.0
+            
+        else:
+            # %50 kapat, SL girişe çek
+            st.remaining_pct = st.remaining_pct * 0.5
+            st.sl_price = st.entry_price
+            
+            msg = (f"🔄 {symbol} {timeframe}: EMA ÇIKIŞ (Kısmi)\n"
+                   f"Sebep: {ema_reason}\n"
+                   f"Fiyat: {_fmt_price(current_price)}\n"
+                   f"P/L: {profit_pct:+.2f}%\n"
+                   f"%50 kapatıldı, SL girişe çekildi\n"
+                   f"Kalan: %{st.remaining_pct:.0f}")
+            await enqueue_message(msg)
+        
+        async with _state_async_lock:
+            state_map[key] = st
+        return st.remaining_pct <= 0
+    
+    return False
 
 # ================== Ana Döngü ==================
 _stop = asyncio.Event()
