@@ -1387,35 +1387,56 @@ async def check_signals(symbol: str, timeframe: str = '4h'):
     price_above = bool(df["tce_price_above_indicators"].iloc[-2]) if "tce_price_above_indicators" in df.columns else False
     price_below = bool(df["tce_price_below_indicators"].iloc[-2]) if "tce_price_below_indicators" in df.columns else False
 
+    # ============ İLK KEZ GÖRÜLEN COİN KONTROLÜ ============
+    # Eğer bu coin için hiç state yoksa (ilk kez görülüyor)
+    # Mevcut fiyat pozisyonuna göre başlat AMA sinyal verilmiş gibi işaretle
+    # Böylece GERÇEK bir kırılım olana kadar sinyal gelmez
+    is_new_coin = (st.last_signal_ts == 0 and st.last_bar_ts == 0 and 
+                   not st.long_breakout_active and not st.short_breakout_active)
+    
+    if is_new_coin:
+        if price_above:
+            # Fiyat zaten üstte, LONG bölgesinde başlıyoruz
+            # Ama sinyal verilmiş gibi işaretle - yeni SHORT kırılımı bekle
+            st.long_breakout_active = True
+            st.long_signal_given = True  # Sanki sinyal verilmiş
+            st.short_breakout_active = False
+            st.short_signal_given = False
+        elif price_below:
+            # Fiyat zaten altta, SHORT bölgesinde başlıyoruz  
+            # Ama sinyal verilmiş gibi işaretle - yeni LONG kırılımı bekle
+            st.short_breakout_active = True
+            st.short_signal_given = True  # Sanki sinyal verilmiş
+            st.long_breakout_active = False
+            st.long_signal_given = False
+        # Ortadaysa (ne üstte ne altta) → her iki taraf da False kalır, kırılım bekler
+
     # ============ KIRILIM MANTIĞI ============
     # LONG kırılım: Fiyat indikatörlerin üstüne çıktı
     # SHORT kırılım: Fiyat indikatörlerin altına indi
     
-    # Kırılım durumunu güncelle
-    if price_above and not st.long_breakout_active:
+    # Önceki bar pozisyonu (gerçek kırılım tespiti için)
+    price_above_prev = bool(df["tce_price_above_indicators"].iloc[-3]) if len(df) > 2 and "tce_price_above_indicators" in df.columns else False
+    price_below_prev = bool(df["tce_price_below_indicators"].iloc[-3]) if len(df) > 2 and "tce_price_below_indicators" in df.columns else False
+    
+    # GERÇEK KIRILIM: Önceki bar farklı bölgedeydi, şimdi geçiş oldu
+    real_long_breakout = price_above and not price_above_prev  # Alttan üste geçti
+    real_short_breakout = price_below and not price_below_prev  # Üstten alta geçti
+    
+    # Kırılım durumunu güncelle (sadece GERÇEK kırılımda)
+    if real_long_breakout:
         # Yeni LONG kırılım oldu!
         st.long_breakout_active = True
         st.long_signal_given = False  # Yeni kırılım, sinyal hakkı açıldı
-        st.short_breakout_active = False  # SHORT kırılım iptal
+        st.short_breakout_active = False
         st.short_signal_given = False
     
-    if price_below and not st.short_breakout_active:
+    if real_short_breakout:
         # Yeni SHORT kırılım oldu!
         st.short_breakout_active = True
         st.short_signal_given = False  # Yeni kırılım, sinyal hakkı açıldı
-        st.long_breakout_active = False  # LONG kırılım iptal
-        st.long_signal_given = False
-    
-    # Ters kırılım kontrolü (reset)
-    if price_below and st.long_breakout_active:
-        # Fiyat indikatörlerin altına kırdı, LONG hakkı bitti
         st.long_breakout_active = False
         st.long_signal_given = False
-    
-    if price_above and st.short_breakout_active:
-        # Fiyat indikatörlerin üstüne kırdı, SHORT hakkı bitti
-        st.short_breakout_active = False
-        st.short_signal_given = False
 
     # Sinyal verilecek mi?
     # LONG: Kırılım aktif + şartlar tutuyor + bu kırılımda henüz sinyal verilmedi
