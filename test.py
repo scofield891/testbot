@@ -1335,12 +1335,10 @@ async def check_signals(symbol: str, timeframe: str = '4h'):
     # Bar timestamp (confirmed bar = -2)
     bar_ts = int(df["timestamp"].iloc[-2])
 
-    # Aynı kapanmış mumu tekrar işleme (restart / tekrar tarama spam'ini keser)
-    is_new_bar = (st.last_bar_ts != bar_ts)
-    criteria.record('new_bar', is_new_bar)
-    
-    if not is_new_bar:
-        return
+    # NOT: new_bar kontrolü KALDIRILDI
+    # Spam koruması cooldown ile yapılıyor (senin eski kodundaki gibi)
+    # Her taramada sinyal koşulları kontrol edilir, cooldown varsa mesaj atılmaz
+    criteria.record('new_bar', True)  # her zaman True (artık bloklamıyor)
 
     # Volume filter (opsiyonel)
     if USE_VOLUME_FILTER:
