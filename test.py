@@ -421,9 +421,12 @@ async def discover_bybit_symbols(linear_only: bool = True, quote_whitelist: Tupl
     return sorted(set(syms))
 
 # ----------------- Rate-limit Dostu OHLCV -----------------
+_ohlcv_success_count = 0
+_ohlcv_fail_count = 0
+
 async def fetch_ohlcv_async(symbol: str, timeframe: str, limit: int):
     """Semaphor'u asla yeniden yaratma; sadece beklemeyi adaptif arttır."""
-    global _last_call_ts, _rate_penalty_ms
+    global _last_call_ts, _rate_penalty_ms, _ohlcv_success_count, _ohlcv_fail_count
     max_attempts = 5
     base_ms = RATE_LIMIT_MS
 
@@ -441,16 +444,34 @@ async def fetch_ohlcv_async(symbol: str, timeframe: str, limit: int):
 
             if _rate_penalty_ms > 0:
                 _rate_penalty_ms = max(0.0, _rate_penalty_ms * 0.6)
+            
+            _ohlcv_success_count += 1
+            if _ohlcv_success_count <= 3:
+                logger.info(f"[OHLCV_OK] {symbol} {timeframe}: {len(data)} bars")
             return data
 
-        except (ccxt.RateLimitExceeded, ccxt.DDoSProtection):
+        except (ccxt.RateLimitExceeded, ccxt.DDoSProtection) as e:
             _rate_penalty_ms = min(4000.0, (_rate_penalty_ms * 1.5) + 150.0)
             backoff = 0.8 * attempt + random.random() * 0.6
+            if attempt == max_attempts:
+                _ohlcv_fail_count += 1
+                if _ohlcv_fail_count <= 5:
+                    logger.warning(f"[OHLCV_RATELIMIT] {symbol}: {e.__class__.__name__}")
             await asyncio.sleep(backoff)
 
-        except (ccxt.RequestTimeout, ccxt.NetworkError):
+        except (ccxt.RequestTimeout, ccxt.NetworkError) as e:
             backoff = 0.6 * attempt + random.random() * 0.6
+            if attempt == max_attempts:
+                _ohlcv_fail_count += 1
+                if _ohlcv_fail_count <= 5:
+                    logger.warning(f"[OHLCV_NETWORK] {symbol}: {e.__class__.__name__}")
             await asyncio.sleep(backoff)
+        
+        except Exception as e:
+            _ohlcv_fail_count += 1
+            if _ohlcv_fail_count <= 5:
+                logger.warning(f"[OHLCV_OTHER] {symbol}: {e.__class__.__name__}: {e}")
+            raise
 
     raise ccxt.NetworkError(f"fetch_ohlcv failed after retries: {symbol} {timeframe}")
 
@@ -1181,11 +1202,14 @@ async def check_signals(symbol: str, timeframe: str = '4h'):
     try:
         data = await fetch_ohlcv_async(symbol, timeframe, max(MIN_BARS, 250))
     except Exception as e:
-        logger.debug(f" (veri yok) {symbol} {timeframe}: {e.__class__.__name__}")
+        if VERBOSE_LOG:
+            logger.debug(f"[OHLCV_ERR] {symbol} {timeframe}: {e.__class__.__name__}: {e}")
         criteria.record('ohlcv_ok', False)
         return
 
     if not data or len(data) < MIN_BARS:
+        if VERBOSE_LOG:
+            logger.debug(f"[OHLCV_SHORT] {symbol} {timeframe}: got {len(data) if data else 0} bars, need {MIN_BARS}")
         criteria.record('ohlcv_ok', False)
         return
 
@@ -1204,10 +1228,11 @@ async def check_signals(symbol: str, timeframe: str = '4h'):
     bar_ts = int(df["timestamp"].iloc[-2])
 
     # Aynı kapanmış mumu tekrar işleme (restart / tekrar tarama spam'ini keser)
-    if st.last_bar_ts == bar_ts:
-        criteria.record('new_bar', False)
+    is_new_bar = (st.last_bar_ts != bar_ts)
+    criteria.record('new_bar', is_new_bar)
+    
+    if not is_new_bar:
         return
-    criteria.record('new_bar', True)
 
     # Volume filter (opsiyonel)
     if USE_VOLUME_FILTER:
@@ -1219,44 +1244,45 @@ async def check_signals(symbol: str, timeframe: str = '4h'):
             st.last_bar_ts = bar_ts
             state_map[key] = st
             return
+    else:
+        criteria.record('volume_ok', True)  # filtre kapalıysa her zaman True
 
-    # cross
+    # cross değerlerini al
     cross_long = bool(df["tce_score_cross_up"].iloc[-2]) if "tce_score_cross_up" in df.columns else False
     cross_short = bool(df["tce_score_cross_dn"].iloc[-2]) if "tce_score_cross_dn" in df.columns else False
 
-
-    # detay kriterler (confirmed bar = -2)
-    try:
-        last = df.iloc[-2]
-        thr = float(TCE_SCORE_THRESHOLD)
-        tL = safe_float(last.get("tce_total_long", np.nan), np.nan)
-        tS = safe_float(last.get("tce_total_short", np.nan), np.nan)
-        criteria.record("score_ge_thr_long", bool(np.isfinite(tL) and tL >= thr))
-        criteria.record("score_ge_thr_short", bool(np.isfinite(tS) and tS >= thr))
-        criteria.record("decision_ok_long", bool(last.get("tce_decision_ok_long", False)))
-        criteria.record("decision_ok_short", bool(last.get("tce_decision_ok_short", False)))
-        criteria.record("sqz_pass_long", bool(last.get("tce_sqz_pass_long", True)))
-        criteria.record("sqz_pass_short", bool(last.get("tce_sqz_pass_short", True)))
-        criteria.record("adx_pass", bool(last.get("tce_adx_pass", True)) if "tce_adx_pass" in df.columns else True)
-        criteria.record("pinbar_ok_long", not bool(last.get("tce_pin_bear", False)))
-        criteria.record("pinbar_ok_short", not bool(last.get("tce_pin_bull", False)))
-    except Exception:
-        pass
+    # detay kriterler (confirmed bar = -2) - HER ZAMAN KAYDET
+    last = df.iloc[-2]
+    thr = float(TCE_SCORE_THRESHOLD)
+    tL = safe_float(last.get("tce_total_long", np.nan), np.nan)
+    tS = safe_float(last.get("tce_total_short", np.nan), np.nan)
+    
+    criteria.record("score_ge_thr_long", bool(np.isfinite(tL) and tL >= thr))
+    criteria.record("score_ge_thr_short", bool(np.isfinite(tS) and tS >= thr))
+    criteria.record("decision_ok_long", bool(last.get("tce_decision_ok_long", False)))
+    criteria.record("decision_ok_short", bool(last.get("tce_decision_ok_short", False)))
+    criteria.record("sqz_pass_long", bool(last.get("tce_sqz_pass_long", True)))
+    criteria.record("sqz_pass_short", bool(last.get("tce_sqz_pass_short", True)))
+    criteria.record("adx_pass", bool(last.get("tce_adx_pass", True)) if "tce_adx_pass" in df.columns else True)
+    criteria.record("pinbar_ok_long", not bool(last.get("tce_pin_bear", False)))
+    criteria.record("pinbar_ok_short", not bool(last.get("tce_pin_bull", False)))
 
     criteria.record("cross_long", cross_long)
     criteria.record("cross_short", cross_short)
 
-
     # Aynı mumda hem LONG hem SHORT => pas geç
-    criteria.record('dual_cross_ok', not (cross_long and cross_short))
-    if cross_long and cross_short:
+    dual_cross = cross_long and cross_short
+    criteria.record('dual_cross_ok', not dual_cross)
+    
+    if dual_cross:
         st.last_bar_ts = bar_ts
         state_map[key] = st
         return
 
-    criteria.record('either_cross', bool(cross_long or cross_short))
+    either_cross = cross_long or cross_short
+    criteria.record('either_cross', either_cross)
 
-    if not (cross_long or cross_short):
+    if not either_cross:
         # sadece bar işaretle
         st.last_bar_ts = bar_ts
         state_map[key] = st
@@ -1265,11 +1291,16 @@ async def check_signals(symbol: str, timeframe: str = '4h'):
     side = "LONG" if cross_long else "SHORT"
 
     # cooldown (yön bazlı)
-    dir_cooldown_ok = not ((not APPLY_COOLDOWN_BOTH_DIRECTIONS) and (st.last_side == side) and (now_ts < st.cooldown_until))
+    if APPLY_COOLDOWN_BOTH_DIRECTIONS:
+        dir_cooldown_ok = True  # zaten başta kontrol ettik
+    else:
+        dir_cooldown_ok = (st.last_side != side) or (now_ts >= st.cooldown_until)
+    
     criteria.record('cooldown_dir_pass', dir_cooldown_ok)
     if not dir_cooldown_ok:
+        st.last_bar_ts = bar_ts
+        state_map[key] = st
         return
-
 
     # --- LTF teyit (4H sinyali için 2H SQZ rengi) ---
     ltf_ok = await ltf_sqz_confirm(symbol, bar_ts, side)
@@ -1287,14 +1318,15 @@ async def check_signals(symbol: str, timeframe: str = '4h'):
         try:
             plan = compute_tp_sl_plan(df, side)
             if USE_TP_SL_GUARD and plan is not None:
-                criteria.record('tp_sl_guard_ok', bool(plan.get('guard_ok', True)))
+                guard_ok = bool(plan.get('guard_ok', True))
+                criteria.record('tp_sl_guard_ok', guard_ok)
             
-            if USE_TP_SL_GUARD and plan is not None and not plan.get("guard_ok", True):
-                if VERBOSE_LOG:
-                    logger.debug(f"[TP_SL_GUARD_REJECT] {symbol} {timeframe} | {plan.get('guard_reason','')}")
-                st.last_bar_ts = bar_ts
-                state_map[key] = st
-                return
+                if not guard_ok:
+                    if VERBOSE_LOG:
+                        logger.debug(f"[TP_SL_GUARD_REJECT] {symbol} {timeframe} | {plan.get('guard_reason','')}")
+                    st.last_bar_ts = bar_ts
+                    state_map[key] = st
+                    return
         except Exception as e:
             logger.debug(f"[TP_SL_ERR] {symbol} {timeframe}: {e.__class__.__name__}")
             plan = None
@@ -1364,6 +1396,9 @@ async def main():
                 for name, false_cnt, total_cnt in items:
                     pct = (false_cnt / total_cnt * 100.0) if total_cnt else 0.0
                     logger.info(f" - {name}: {false_cnt}/{total_cnt} ({pct:.1f}%)")
+            
+            # OHLCV özeti
+            logger.info(f"OHLCV özeti: başarılı={_ohlcv_success_count}, başarısız={_ohlcv_fail_count}")
 
             save_state()
             await asyncio.sleep(SCAN_PAUSE_SEC)
