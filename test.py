@@ -337,6 +337,11 @@ class PosState:
     last_side: str = ""              # "LONG"/"SHORT"
     last_bar_ts: int = 0
     cooldown_until: float = 0.0
+    # Kırılım takibi
+    long_breakout_active: bool = False   # LONG kırılım oldu, sinyal hakkı var
+    short_breakout_active: bool = False  # SHORT kırılım oldu, sinyal hakkı var
+    long_signal_given: bool = False      # Bu kırılımda LONG sinyal verildi mi
+    short_signal_given: bool = False     # Bu kırılımda SHORT sinyal verildi mi
 
 _state_lock = threading.Lock()
 _state_async_lock = asyncio.Lock()  # async race condition önleme
@@ -1116,9 +1121,20 @@ def _tce_scores(df: pd.DataFrame) -> None:
     df["tce_decision_ok_long"] = (totalL >= thr) & (~blockedL)
     df["tce_decision_ok_short"] = (totalS >= thr) & (~blockedS)
 
-    # cross events (bar close)
-    df["tce_score_cross_up"] = df["tce_decision_ok_long"] & (df["tce_total_long"].shift(1) < thr)
-    df["tce_score_cross_dn"] = df["tce_decision_ok_short"] & (df["tce_total_short"].shift(1) < thr)
+    # ============ FİYAT POZİSYONU (Kırılım tespiti için) ============
+    at = df["tce_at"].to_numpy(dtype=np.float64)  # AlphaTrend
+    R = df["tce_r"].to_numpy(dtype=np.float64)    # R-line (Donchian+SMA)
+    
+    # Fiyat indikatörlerin üstünde mi altında mı?
+    # LONG bölge: Fiyat hem AT hem R'nin üstünde
+    # SHORT bölge: Fiyat hem AT hem R'nin altında
+    df["tce_price_above_indicators"] = (close > at) & (close > R)
+    df["tce_price_below_indicators"] = (close < at) & (close < R)
+    
+    # Cross eventleri artık burada hesaplanmıyor
+    # Kırılım mantığı check_signals fonksiyonunda state ile takip edilecek
+    df["tce_score_cross_up"] = df["tce_decision_ok_long"]  # Sadece şartlar tutuyorsa
+    df["tce_score_cross_dn"] = df["tce_decision_ok_short"]  # Kırılım kontrolü check_signals'da
 
 
 def add_tce_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -1363,9 +1379,49 @@ async def check_signals(symbol: str, timeframe: str = '4h'):
     else:
         criteria.record('volume_ok', True)  # filtre kapalıysa her zaman True
 
-    # cross değerlerini al
-    cross_long = bool(df["tce_score_cross_up"].iloc[-2]) if "tce_score_cross_up" in df.columns else False
-    cross_short = bool(df["tce_score_cross_dn"].iloc[-2]) if "tce_score_cross_dn" in df.columns else False
+    # cross değerlerini al (şartlar tutuyor mu)
+    decision_ok_long = bool(df["tce_score_cross_up"].iloc[-2]) if "tce_score_cross_up" in df.columns else False
+    decision_ok_short = bool(df["tce_score_cross_dn"].iloc[-2]) if "tce_score_cross_dn" in df.columns else False
+
+    # Fiyat pozisyonu (kırılım tespiti için)
+    price_above = bool(df["tce_price_above_indicators"].iloc[-2]) if "tce_price_above_indicators" in df.columns else False
+    price_below = bool(df["tce_price_below_indicators"].iloc[-2]) if "tce_price_below_indicators" in df.columns else False
+
+    # ============ KIRILIM MANTIĞI ============
+    # LONG kırılım: Fiyat indikatörlerin üstüne çıktı
+    # SHORT kırılım: Fiyat indikatörlerin altına indi
+    
+    # Kırılım durumunu güncelle
+    if price_above and not st.long_breakout_active:
+        # Yeni LONG kırılım oldu!
+        st.long_breakout_active = True
+        st.long_signal_given = False  # Yeni kırılım, sinyal hakkı açıldı
+        st.short_breakout_active = False  # SHORT kırılım iptal
+        st.short_signal_given = False
+    
+    if price_below and not st.short_breakout_active:
+        # Yeni SHORT kırılım oldu!
+        st.short_breakout_active = True
+        st.short_signal_given = False  # Yeni kırılım, sinyal hakkı açıldı
+        st.long_breakout_active = False  # LONG kırılım iptal
+        st.long_signal_given = False
+    
+    # Ters kırılım kontrolü (reset)
+    if price_below and st.long_breakout_active:
+        # Fiyat indikatörlerin altına kırdı, LONG hakkı bitti
+        st.long_breakout_active = False
+        st.long_signal_given = False
+    
+    if price_above and st.short_breakout_active:
+        # Fiyat indikatörlerin üstüne kırdı, SHORT hakkı bitti
+        st.short_breakout_active = False
+        st.short_signal_given = False
+
+    # Sinyal verilecek mi?
+    # LONG: Kırılım aktif + şartlar tutuyor + bu kırılımda henüz sinyal verilmedi
+    cross_long = decision_ok_long and st.long_breakout_active and not st.long_signal_given
+    # SHORT: Kırılım aktif + şartlar tutuyor + bu kırılımda henüz sinyal verilmedi  
+    cross_short = decision_ok_short and st.short_breakout_active and not st.short_signal_given
 
     # detay kriterler (confirmed bar = -2) - HER ZAMAN KAYDET
     last = df.iloc[-2]
@@ -1375,8 +1431,12 @@ async def check_signals(symbol: str, timeframe: str = '4h'):
     
     criteria.record("score_ge_thr_long", bool(np.isfinite(tL) and tL >= thr))
     criteria.record("score_ge_thr_short", bool(np.isfinite(tS) and tS >= thr))
-    criteria.record("decision_ok_long", bool(last.get("tce_decision_ok_long", False)))
-    criteria.record("decision_ok_short", bool(last.get("tce_decision_ok_short", False)))
+    criteria.record("decision_ok_long", decision_ok_long)
+    criteria.record("decision_ok_short", decision_ok_short)
+    criteria.record("long_breakout_active", st.long_breakout_active)
+    criteria.record("short_breakout_active", st.short_breakout_active)
+    criteria.record("long_signal_given", not st.long_signal_given)  # True = henüz verilmedi
+    criteria.record("short_signal_given", not st.short_signal_given)
     criteria.record("sqz_pass_long", bool(last.get("tce_sqz_pass_long", True)))
     criteria.record("sqz_pass_short", bool(last.get("tce_sqz_pass_short", True)))
     criteria.record("adx_pass", bool(last.get("tce_adx_pass", True)) if "tce_adx_pass" in df.columns else True)
@@ -1462,6 +1522,13 @@ async def check_signals(symbol: str, timeframe: str = '4h'):
     st.last_side = side
     st.last_bar_ts = bar_ts
     st.cooldown_until = now_ts + COOLDOWN_MINUTES * 60
+    
+    # Bu kırılımda sinyal verildi, bir daha verilmeyecek (ters kırılıma kadar)
+    if side == "LONG":
+        st.long_signal_given = True
+    else:
+        st.short_signal_given = True
+    
     async with _state_async_lock:
         state_map[key] = st
 
