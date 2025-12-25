@@ -1247,7 +1247,12 @@ def check_ema_exit(df: pd.DataFrame, st: 'PosState') -> Tuple[bool, str, float]:
 
 
 def check_tp_sl_hits(df: pd.DataFrame, st: 'PosState') -> Tuple[bool, str]:
-    """TP1, TP2, SL kontrolü."""
+    """TP1, TP2, SL kontrolü.
+    
+    ÖNEMLİ: TP kontrolleri SL'den ÖNCE yapılır.
+    Çünkü aynı bar'da hem TP hem SL seviyesine dokunulabilir.
+    Bu durumda TP öncelikli.
+    """
     if not st.position_open:
         return False, ""
     
@@ -1256,26 +1261,40 @@ def check_tp_sl_hits(df: pd.DataFrame, st: 'PosState') -> Tuple[bool, str]:
     low = float(last["low"])
     
     if st.position_side == "LONG":
-        # SL kontrolü
-        if low <= st.sl_price:
-            return True, "SL_HIT"
-        # TP2 kontrolü (TP1'den sonra)
-        if st.tp1_hit and high >= st.tp2_price:
-            return True, "TP2_HIT"
-        # TP1 kontrolü
+        # TP1 kontrolü (henüz vurulmadıysa)
         if not st.tp1_hit and high >= st.tp1_price:
             return True, "TP1_HIT"
+        # TP2 kontrolü (TP1'den sonra VE henüz TP2 vurulmadıysa)
+        if st.tp1_hit and not st.tp2_hit and high >= st.tp2_price:
+            return True, "TP2_HIT"
+        # SL kontrolü - TP1 hit olduysa SL girişte, close'a bak (low değil)
+        if st.tp1_hit:
+            # TP1 vurulduysa SL girişe çekilmiş, CLOSE fiyatına bak
+            close = float(last["close"])
+            if close <= st.sl_price:
+                return True, "SL_HIT"
+        else:
+            # TP1 vurulmadıysa normal SL kontrolü (low'a bak)
+            if low <= st.sl_price:
+                return True, "SL_HIT"
     
     else:  # SHORT
-        # SL kontrolü
-        if high >= st.sl_price:
-            return True, "SL_HIT"
-        # TP2 kontrolü (TP1'den sonra)
-        if st.tp1_hit and low <= st.tp2_price:
-            return True, "TP2_HIT"
-        # TP1 kontrolü
+        # TP1 kontrolü (henüz vurulmadıysa)
         if not st.tp1_hit and low <= st.tp1_price:
             return True, "TP1_HIT"
+        # TP2 kontrolü (TP1'den sonra VE henüz TP2 vurulmadıysa)
+        if st.tp1_hit and not st.tp2_hit and low <= st.tp2_price:
+            return True, "TP2_HIT"
+        # SL kontrolü - TP1 hit olduysa SL girişte, close'a bak (high değil)
+        if st.tp1_hit:
+            # TP1 vurulduysa SL girişe çekilmiş, CLOSE fiyatına bak
+            close = float(last["close"])
+            if close >= st.sl_price:
+                return True, "SL_HIT"
+        else:
+            # TP1 vurulmadıysa normal SL kontrolü (high'a bak)
+            if high >= st.sl_price:
+                return True, "SL_HIT"
     
     return False, ""
 
@@ -1582,11 +1601,32 @@ async def check_signals(symbol: str, timeframe: str = '4h'):
         st.long_breakout_active = False
         st.long_signal_given = False
 
+    # ============ 4H SQZ RENK FİLTRESİ (ZORUNLU) ============
+    # LazyBear SQZ Momentum renkleri:
+    # - Açık Yeşil (Lime): mom > 0 VE mom > mom_prev → LONG için şart
+    # - Açık Kırmızı: mom < 0 VE mom > mom_prev → SHORT için şart
+    
+    mom = safe_float(last.get("lb_sqz_val", np.nan), np.nan)
+    mom_prev = safe_float(df.iloc[-3].get("lb_sqz_val", np.nan), np.nan) if len(df) > 2 else np.nan
+    
+    sqz_lime = bool(np.isfinite(mom) and np.isfinite(mom_prev) and mom > 0 and mom > mom_prev)  # Açık yeşil
+    sqz_light_red = bool(np.isfinite(mom) and np.isfinite(mom_prev) and mom < 0 and mom > mom_prev)  # Açık kırmızı
+    
+    # ============ MUM RENGİ FİLTRESİ (ZORUNLU) ============
+    # LONG için yeşil mum (close > open)
+    # SHORT için kırmızı mum (close < open)
+    
+    candle_open = safe_float(last.get("open", np.nan), np.nan)
+    candle_close = safe_float(last.get("close", np.nan), np.nan)
+    
+    is_green_candle = bool(np.isfinite(candle_open) and np.isfinite(candle_close) and candle_close > candle_open)
+    is_red_candle = bool(np.isfinite(candle_open) and np.isfinite(candle_close) and candle_close < candle_open)
+
     # Sinyal verilecek mi?
-    # LONG: Kırılım aktif + şartlar tutuyor + bu kırılımda henüz sinyal verilmedi
-    cross_long = decision_ok_long and st.long_breakout_active and not st.long_signal_given
-    # SHORT: Kırılım aktif + şartlar tutuyor + bu kırılımda henüz sinyal verilmedi  
-    cross_short = decision_ok_short and st.short_breakout_active and not st.short_signal_given
+    # LONG: Kırılım aktif + şartlar tutuyor + bu kırılımda henüz sinyal verilmedi + SQZ lime + yeşil mum
+    cross_long = decision_ok_long and st.long_breakout_active and not st.long_signal_given and sqz_lime and is_green_candle
+    # SHORT: Kırılım aktif + şartlar tutuyor + bu kırılımda henüz sinyal verilmedi + SQZ açık kırmızı + kırmızı mum
+    cross_short = decision_ok_short and st.short_breakout_active and not st.short_signal_given and sqz_light_red and is_red_candle
 
     # detay kriterler (confirmed bar = -2) - HER ZAMAN KAYDET
     last = df.iloc[-2]
@@ -1602,6 +1642,10 @@ async def check_signals(symbol: str, timeframe: str = '4h'):
     criteria.record("short_breakout_active", st.short_breakout_active)
     criteria.record("long_signal_given", not st.long_signal_given)  # True = henüz verilmedi
     criteria.record("short_signal_given", not st.short_signal_given)
+    criteria.record("sqz_lime", sqz_lime)  # LONG için açık yeşil
+    criteria.record("sqz_light_red", sqz_light_red)  # SHORT için açık kırmızı
+    criteria.record("is_green_candle", is_green_candle)  # Yeşil mum
+    criteria.record("is_red_candle", is_red_candle)  # Kırmızı mum
     criteria.record("sqz_pass_long", bool(last.get("tce_sqz_pass_long", True)))
     criteria.record("sqz_pass_short", bool(last.get("tce_sqz_pass_short", True)))
     criteria.record("adx_pass", bool(last.get("tce_adx_pass", True)) if "tce_adx_pass" in df.columns else True)
