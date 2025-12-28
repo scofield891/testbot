@@ -1918,9 +1918,21 @@ async def main():
             items = criteria.report()
             if items:
                 logger.info("Kriter FALSE dökümü (yüksekten düşüğe):")
-                for name, false_cnt, total_cnt in items:
+                for name, false_cnt, total_cnt in items[:20]:  # İlk 20 kriter
                     pct = (false_cnt / total_cnt * 100.0) if total_cnt else 0.0
                     logger.info(f" - {name}: {false_cnt}/{total_cnt} ({pct:.1f}%)")
+                
+                # Önemli kriterleri her zaman göster (items'da olmasa bile)
+                important_keys = ["cross_long", "cross_short", "sqz_lime", "sqz_light_red", 
+                                  "is_green_candle", "is_red_candle", "long_breakout_active", 
+                                  "short_breakout_active", "decision_ok_long", "decision_ok_short"]
+                shown_keys = [x[0] for x in items[:20]]
+                for key in important_keys:
+                    if key not in shown_keys:
+                        stats = criteria.stats.get(key, [0, 0])
+                        if stats[1] > 0:
+                            pct = (stats[0] / stats[1] * 100.0)
+                            logger.info(f" - {key}: {stats[0]}/{stats[1]} ({pct:.1f}%) [ÖNEMLİ]")
             
             # OHLCV ve çağrı özeti
             logger.info(f"OHLCV özeti: başarılı={_ohlcv_success_count}, başarısız={_ohlcv_fail_count}")
