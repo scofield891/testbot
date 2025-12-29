@@ -1606,6 +1606,8 @@ async def check_signals(symbol: str, timeframe: str = '4h'):
     # - Açık Yeşil (Lime): mom > 0 VE mom > mom_prev → LONG için şart
     # - Açık Kırmızı: mom < 0 VE mom > mom_prev → SHORT için şart
     
+    last = df.iloc[-2]  # Kapanmış bar (confirmed)
+    
     mom = safe_float(last.get("lb_sqz_val", np.nan), np.nan)
     mom_prev = safe_float(df.iloc[-3].get("lb_sqz_val", np.nan), np.nan) if len(df) > 2 else np.nan
     
@@ -1629,7 +1631,6 @@ async def check_signals(symbol: str, timeframe: str = '4h'):
     cross_short = decision_ok_short and st.short_breakout_active and not st.short_signal_given and sqz_light_red and is_red_candle
 
     # detay kriterler (confirmed bar = -2) - HER ZAMAN KAYDET
-    last = df.iloc[-2]
     thr = float(TCE_SCORE_THRESHOLD)
     tL = safe_float(last.get("tce_total_long", np.nan), np.nan)
     tS = safe_float(last.get("tce_total_short", np.nan), np.nan)
