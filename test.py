@@ -1608,8 +1608,8 @@ async def check_signals(symbol: str, timeframe: str = '4h'):
     
     last = df.iloc[-2]  # Kapanmış bar (confirmed)
     
-    mom = safe_float(last.get("lb_sqz_val", np.nan), np.nan)
-    mom_prev = safe_float(df.iloc[-3].get("lb_sqz_val", np.nan), np.nan) if len(df) > 2 else np.nan
+    mom = safe_float(last.get("tce_sqz_mom", np.nan), np.nan)
+    mom_prev = safe_float(df.iloc[-3].get("tce_sqz_mom", np.nan), np.nan) if len(df) > 2 else np.nan
     
     sqz_lime = bool(np.isfinite(mom) and np.isfinite(mom_prev) and mom > 0 and mom > mom_prev)  # Açık yeşil
     sqz_light_red = bool(np.isfinite(mom) and np.isfinite(mom_prev) and mom < 0 and mom > mom_prev)  # Açık kırmızı
