@@ -1771,14 +1771,15 @@ async def check_position_exit(symbol: str, timeframe: str, df: pd.DataFrame, st:
     if tp_sl_hit:
         if tp_sl_reason == "TP1_HIT":
             # TP1 vuruldu - %30 kapat, SL girişe çek
-            profit_pct = abs(current_price - st.entry_price) / st.entry_price * 100
+            exit_price = st.tp1_price  # TP1 fiyatından çıkıldı
+            profit_pct = abs(exit_price - st.entry_price) / st.entry_price * 100
             st.tp1_hit = True
             st.remaining_pct = 70.0  # %30 kapandı
             old_sl = st.sl_price
             st.sl_price = st.entry_price  # SL girişe
             
             msg = (f"🎯 {symbol} {timeframe}: TP1 HIT!\n"
-                   f"Fiyat: {_fmt_price(current_price)}\n"
+                   f"TP1 Fiyat: {_fmt_price(exit_price)}\n"
                    f"P/L: +{profit_pct:.2f}%\n"
                    f"%30 kapatıldı, SL girişe çekildi\n"
                    f"Kalan: %{st.remaining_pct:.0f}")
@@ -1790,12 +1791,13 @@ async def check_position_exit(symbol: str, timeframe: str, df: pd.DataFrame, st:
         
         elif tp_sl_reason == "TP2_HIT":
             # TP2 vuruldu - %30 daha kapat
-            profit_pct = abs(current_price - st.entry_price) / st.entry_price * 100
+            exit_price = st.tp2_price  # TP2 fiyatından çıkıldı
+            profit_pct = abs(exit_price - st.entry_price) / st.entry_price * 100
             st.tp2_hit = True
             st.remaining_pct = 40.0  # %30 daha kapandı
             
             msg = (f"🎯🎯 {symbol} {timeframe}: TP2 HIT!\n"
-                   f"Fiyat: {_fmt_price(current_price)}\n"
+                   f"TP2 Fiyat: {_fmt_price(exit_price)}\n"
                    f"P/L: +{profit_pct:.2f}%\n"
                    f"%30 daha kapatıldı\n"
                    f"Kalan: %{st.remaining_pct:.0f}")
@@ -1807,13 +1809,15 @@ async def check_position_exit(symbol: str, timeframe: str, df: pd.DataFrame, st:
         
         elif tp_sl_reason == "SL_HIT":
             # SL vuruldu - tümünü kapat
+            # SL fiyatından çıkıldığını varsay (gerçek çıkış fiyatı)
+            exit_price = st.sl_price
             if st.position_side == "LONG":
-                profit_pct = (current_price - st.entry_price) / st.entry_price * 100
+                profit_pct = (exit_price - st.entry_price) / st.entry_price * 100
             else:
-                profit_pct = (st.entry_price - current_price) / st.entry_price * 100
+                profit_pct = (st.entry_price - exit_price) / st.entry_price * 100
             
             msg = (f"⛔ {symbol} {timeframe}: STOP LOSS!\n"
-                   f"Fiyat: {_fmt_price(current_price)}\n"
+                   f"SL Fiyat: {_fmt_price(exit_price)}\n"
                    f"P/L: {profit_pct:+.2f}%\n"
                    f"Pozisyon kapatıldı")
             await enqueue_message(msg)
