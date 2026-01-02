@@ -352,6 +352,7 @@ class PosState:
     tp1_hit: bool = False                # TP1 vuruldu mu
     tp2_hit: bool = False                # TP2 vuruldu mu
     remaining_pct: float = 100.0         # Kalan pozisyon yüzdesi
+    entry_bar_ts: int = 0                # Giriş barının timestamp'i (aynı barda TP/SL kontrolü yapılmasın)
 
 _state_lock = threading.Lock()
 _state_async_lock = asyncio.Lock()  # async race condition önleme
@@ -1249,14 +1250,22 @@ def check_ema_exit(df: pd.DataFrame, st: 'PosState') -> Tuple[bool, str, float]:
 def check_tp_sl_hits(df: pd.DataFrame, st: 'PosState') -> Tuple[bool, str]:
     """TP1, TP2, SL kontrolü.
     
-    ÖNEMLİ: TP kontrolleri SL'den ÖNCE yapılır.
-    Çünkü aynı bar'da hem TP hem SL seviyesine dokunulabilir.
-    Bu durumda TP öncelikli.
+    ÖNEMLİ: 
+    1. Entry barında TP/SL kontrolü yapılmaz (aynı barda sinyal+çıkış olmasın)
+    2. TP kontrolleri SL'den ÖNCE yapılır (aynı bar'da ikisine de dokunulabilir)
+    3. Breakeven SL'de eşitlik kontrolü yapılmaz (< kullanılır, <= değil)
     """
     if not st.position_open:
         return False, ""
     
     last = df.iloc[-2]
+    last_ts = int(last["timestamp"])
+    
+    # Entry barında TP/SL kontrolü yapma!
+    # Aynı bar'da hem sinyal hem çıkış olmasını engelle
+    if st.entry_bar_ts and last_ts <= st.entry_bar_ts:
+        return False, ""
+    
     high = float(last["high"])
     low = float(last["low"])
     
@@ -1270,8 +1279,9 @@ def check_tp_sl_hits(df: pd.DataFrame, st: 'PosState') -> Tuple[bool, str]:
         # SL kontrolü - TP1 hit olduysa SL girişte, close'a bak (low değil)
         if st.tp1_hit:
             # TP1 vurulduysa SL girişe çekilmiş, CLOSE fiyatına bak
+            # < kullan (eşitlikte tetikleme, küçük dalgalanmada çıkmasın)
             close = float(last["close"])
-            if close <= st.sl_price:
+            if close < st.sl_price:
                 return True, "SL_HIT"
         else:
             # TP1 vurulmadıysa normal SL kontrolü (low'a bak)
@@ -1288,8 +1298,9 @@ def check_tp_sl_hits(df: pd.DataFrame, st: 'PosState') -> Tuple[bool, str]:
         # SL kontrolü - TP1 hit olduysa SL girişte, close'a bak (high değil)
         if st.tp1_hit:
             # TP1 vurulduysa SL girişe çekilmiş, CLOSE fiyatına bak
+            # > kullan (eşitlikte tetikleme, küçük dalgalanmada çıkmasın)
             close = float(last["close"])
-            if close >= st.sl_price:
+            if close > st.sl_price:
                 return True, "SL_HIT"
         else:
             # TP1 vurulmadıysa normal SL kontrolü (high'a bak)
@@ -1743,6 +1754,7 @@ async def check_signals(symbol: str, timeframe: str = '4h'):
     st.position_open = True
     st.position_side = side
     st.entry_price = safe_float(df.iloc[-2]["close"], 0.0)
+    st.entry_bar_ts = int(df.iloc[-2]["timestamp"])  # Entry barını kaydet
     if plan:
         st.sl_price = safe_float(plan.get("sl", 0), 0.0)
         st.tp1_price = safe_float(plan.get("tp1", 0), 0.0)
