@@ -66,7 +66,7 @@ APPLY_COOLDOWN_BOTH_DIRECTIONS = os.getenv("APPLY_COOLDOWN_BOTH_DIRECTIONS", "1"
 
 # ================== TP/SL (R-tabanlı plan) ==================
 TP_SL_ENABLED = os.getenv("TP_SL_ENABLED", "1") == "1"
-USE_TP_SL_GUARD = os.getenv("USE_TP_SL_GUARD", "0") == "1"
+USE_TP_SL_GUARD = os.getenv("USE_TP_SL_GUARD", "1") == "1"  # GARANTİCİ: Açık
 
 # ATR / SL (classic ATR-based stop)
 TP_ATR_LEN = int(os.getenv("TP_ATR_LEN", "18"))
@@ -166,13 +166,13 @@ def compute_tp_sl_plan(df: pd.DataFrame, side: str) -> dict:
 
 TCE_PROFILE = os.getenv("TCE_PROFILE", "Kripto")  # Otomatik / Kripto / BIST (burada default Kripto)
 
-# --- ADX Filter 🛡️ (Pine defaults)
-TCE_ADX_MODE   = os.getenv("TCE_ADX_MODE", "Soft")  # Off / Soft / Hard
+# --- ADX Filter 🛡️ (GARANTİCİ defaults)
+TCE_ADX_MODE   = os.getenv("TCE_ADX_MODE", "Hard")  # GARANTİCİ: Hard (chop'ta sinyal vermesin)
 TCE_ADX_LEN    = int(os.getenv("TCE_ADX_LEN", "14"))
-TCE_ADX_EARLY  = os.getenv("TCE_ADX_EARLY", "1") == "1"  # Early pass
+TCE_ADX_EARLY  = os.getenv("TCE_ADX_EARLY", "0") == "1"  # GARANTİCİ: Kapalı (chop'ta erken sinyal vermesin)
 
-# --- Squeeze (LazyBear) 🧨 (Pine defaults)
-TCE_SQZ_MODE         = os.getenv("TCE_SQZ_MODE", "Soft")  # Soft / Hard / Off
+# --- Squeeze (LazyBear) 🧨 (GARANTİCİ defaults)
+TCE_SQZ_MODE         = os.getenv("TCE_SQZ_MODE", "Hard")  # GARANTİCİ: Hard (yanlış SQZ = tam blok)
 TCE_SQZ_LEN          = int(os.getenv("TCE_SQZ_LEN", "20"))
 TCE_SQZ_BB_MULT      = float(os.getenv("TCE_SQZ_BB_MULT", "2.0"))
 TCE_SQZ_KC_MULT      = float(os.getenv("TCE_SQZ_KC_MULT", "1.5"))
@@ -185,8 +185,8 @@ TCE_PIN_WICK_MIN    = float(os.getenv("TCE_PIN_WICK_MIN", "0.55"))
 TCE_PIN_BODY_MAX    = float(os.getenv("TCE_PIN_BODY_MAX", "0.30"))
 TCE_PIN_CLOSE_MAX   = float(os.getenv("TCE_PIN_CLOSE_MAX", "0.35"))
 
-# --- Score 🧮 (Pine defaults)
-TCE_SCORE_THRESHOLD = float(os.getenv("TCE_SCORE_THRESHOLD", "70"))
+# --- Score 🧮 (GARANTİCİ defaults)
+TCE_SCORE_THRESHOLD = float(os.getenv("TCE_SCORE_THRESHOLD", "80"))  # GARANTİCİ: 80 (daha sıkı)
 TCE_ATR_LEN_NORM    = int(os.getenv("TCE_ATR_LEN_NORM", "14"))
 TCE_SLOPE_BARS      = int(os.getenv("TCE_SLOPE_BARS", "5"))
 
@@ -1361,6 +1361,124 @@ def format_signal(symbol: str, timeframe: str, side: str, df: pd.DataFrame, plan
         f"Tarih: {date_str}",
     ]
     return "\n".join(lines)
+
+# =====================
+# HTF GATE (1D Trend Filtresi) - GARANTİCİ
+# =====================
+# 1D trend yönünde 4H sinyal ver
+# LONG için: 1D Close > EMA21 VE SQZ mom > 0
+# SHORT için: 1D Close < EMA21 VE SQZ mom < 0
+
+USE_HTF_GATE = os.getenv("USE_HTF_GATE", "1") == "1"  # GARANTİCİ: Açık
+HTF_TIMEFRAME = os.getenv("HTF_TIMEFRAME", "1d")
+HTF_EMA_LEN = int(os.getenv("HTF_EMA_LEN", "21"))
+HTF_REQUIRE_EMA = os.getenv("HTF_REQUIRE_EMA", "1") == "1"  # Close vs EMA kontrolü
+HTF_REQUIRE_SQZ = os.getenv("HTF_REQUIRE_SQZ", "1") == "1"  # SQZ momentum kontrolü
+HTF_MIN_BARS = int(os.getenv("HTF_MIN_BARS", "50"))  # 1D için yeterli bar
+
+# HTF verilerini cache'le (her coin için 1D veriyi tekrar çekmeyelim)
+_htf_cache: Dict[str, Tuple[float, float, float, float]] = {}  # symbol -> (close, ema21, mom, timestamp)
+_htf_cache_lock = threading.Lock()
+HTF_CACHE_TTL_SEC = 3600  # 1 saat cache (1D veri sık değişmez)
+
+
+async def fetch_htf_data(symbol: str) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    """1D veri çek ve EMA21 + SQZ momentum hesapla.
+    
+    Returns:
+        (close, ema21, sqz_mom) veya hata durumunda (None, None, None)
+    """
+    global _htf_cache
+    
+    now_ts = time.time()
+    
+    # Cache kontrolü
+    with _htf_cache_lock:
+        if symbol in _htf_cache:
+            close, ema21, mom, cached_ts = _htf_cache[symbol]
+            if now_ts - cached_ts < HTF_CACHE_TTL_SEC:
+                return close, ema21, mom
+    
+    try:
+        data = await fetch_ohlcv_async(symbol, HTF_TIMEFRAME, HTF_MIN_BARS)
+        if not data or len(data) < HTF_MIN_BARS:
+            return None, None, None
+        
+        df = pd.DataFrame(data, columns=["timestamp", "open", "high", "low", "close", "volume"])
+        df["close"] = df["close"].astype(float)
+        
+        # EMA21 hesapla
+        close_arr = df["close"].to_numpy(dtype=np.float64)
+        ema21_arr = ema_np(close_arr, HTF_EMA_LEN)
+        
+        # SQZ Momentum hesapla (LazyBear)
+        _tce_squeeze_momentum(df)
+        
+        # Son kapanmış bar (-2)
+        last = df.iloc[-2]
+        close_val = float(last["close"])
+        ema21_val = float(ema21_arr[-2]) if len(ema21_arr) > 1 else np.nan
+        mom_val = float(last.get("tce_sqz_mom", np.nan))
+        
+        # Cache'e kaydet
+        with _htf_cache_lock:
+            _htf_cache[symbol] = (close_val, ema21_val, mom_val, now_ts)
+        
+        return close_val, ema21_val, mom_val
+        
+    except Exception as e:
+        if VERBOSE_LOG:
+            logger.debug(f"[HTF_FETCH_ERR] {symbol}: {e.__class__.__name__}")
+        return None, None, None
+
+
+async def htf_gate_check(symbol: str, side: str) -> Tuple[bool, str]:
+    """1D trend gate kontrolü.
+    
+    LONG için: 1D Close > EMA21 VE SQZ mom > 0
+    SHORT için: 1D Close < EMA21 VE SQZ mom < 0
+    
+    Returns:
+        (passed, reason)
+    """
+    if not USE_HTF_GATE:
+        return True, "htf_gate_disabled"
+    
+    close, ema21, mom = await fetch_htf_data(symbol)
+    
+    # Veri yoksa garantici yaklaşım: blokla
+    if close is None or ema21 is None or not np.isfinite(close) or not np.isfinite(ema21):
+        return False, "htf_data_missing"
+    
+    # SQZ mom yoksa ve gerekiyorsa blokla (garantici)
+    if mom is None or not np.isfinite(mom):
+        if HTF_REQUIRE_SQZ:
+            return False, "htf_sqz_mom_missing"
+        mom = 0.0  # SQZ gerekmiyorsa nötr kabul et
+    
+    # EMA kontrolü
+    ema_ok = True
+    if HTF_REQUIRE_EMA:
+        if side == "LONG":
+            ema_ok = close > ema21
+        else:  # SHORT
+            ema_ok = close < ema21
+    
+    # SQZ kontrolü
+    sqz_ok = True
+    if HTF_REQUIRE_SQZ:
+        if side == "LONG":
+            sqz_ok = mom > 0
+        else:  # SHORT
+            sqz_ok = mom < 0
+    
+    passed = ema_ok and sqz_ok
+    
+    reason = f"1D: close={close:.6f}, ema21={ema21:.6f}, mom={mom:.4f} | ema_ok={ema_ok}, sqz_ok={sqz_ok}"
+    
+    return passed, reason
+
+
 # =====================
 # LTF CONFIRM (4H -> 2H SQZ COLOR CONFIRM)
 # =====================
@@ -1697,6 +1815,20 @@ async def check_signals(symbol: str, timeframe: str = '4h'):
     
     criteria.record('cooldown_dir_pass', dir_cooldown_ok)
     if not dir_cooldown_ok:
+        st.last_bar_ts = bar_ts
+        async with _state_async_lock:
+            state_map[key] = st
+        return
+
+    # --- HTF GATE (1D Trend Filtresi) - GARANTİCİ ---
+    htf_ok, htf_reason = await htf_gate_check(symbol, side)
+    criteria.record(f"htf_gate_{side.lower()}", bool(htf_ok))
+    if not htf_ok:
+        if VERBOSE_LOG:
+            logger.debug(f"[HTF_GATE_REJECT] {symbol} {timeframe} | side={side} | {htf_reason}")
+        else:
+            # Garantici modda HTF reject'leri her zaman logla (debug için)
+            logger.info(f"[HTF_GATE] {symbol} {side} BLOCKED | {htf_reason}")
         st.last_bar_ts = bar_ts
         async with _state_async_lock:
             state_map[key] = st
