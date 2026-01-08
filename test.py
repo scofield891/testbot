@@ -1848,37 +1848,24 @@ async def check_signals(symbol: str, timeframe: str = '4h'):
 
     # ============ ARM SİNYAL MANTIĞI ============
     # ============ SİNYAL MANTIĞI ============
-    # ARM aktif + şartlar tutuyorsa sinyal verilebilir
-    # - Fresh breakout: İlk bar, şartlar tutuyorsa sinyal
-    # - ARM window: Kırılımdan sonraki 3 bar içinde şartlar tutarsa sinyal
-    # - Armed: HTF beklerken decision_ok tutuyorsa sinyal (HTF gate sonra kontrol edilecek)
+    # ZORUNLU ŞARTLAR (HER ZAMAN):
+    # LONG: Yeşil mum + Açık yeşil SQZ (hiçbir istisna yok!)
+    # SHORT: Kırmızı mum + Açık kırmızı SQZ (hiçbir istisna yok!)
     
     is_fresh_long_breakout = st.long_breakout_active and st.long_breakout_bar_ts == bar_ts
     is_fresh_short_breakout = st.short_breakout_active and st.short_breakout_bar_ts == bar_ts
     is_armed_long = st.long_breakout_active and not st.long_signal_given and st.long_breakout_bar_ts > 0 and st.long_breakout_bar_ts < bar_ts
     is_armed_short = st.short_breakout_active and not st.short_signal_given and st.short_breakout_bar_ts > 0 and st.short_breakout_bar_ts < bar_ts
     
-    # LONG sinyal şartları:
-    if is_fresh_long_breakout and long_arm_conditions:
-        # İlk kırılım anı + şartlar tamam
+    # LONG sinyal şartları - ZORUNLU: decision_ok + sqz_lime + green_candle
+    if (is_fresh_long_breakout or is_armed_long) and long_arm_conditions:
         cross_long = True
-    elif is_armed_long:
-        # ARM modunda - şartlar tutuyorsa VEYA sadece decision_ok tutuyorsa (HTF beklerken)
-        if long_arm_conditions:
-            cross_long = True  # Şartlar şimdi tuttu!
-        else:
-            cross_long = decision_ok_long  # Şartlar daha önce tutmuştu, decision_ok hala geçerli mi?
     else:
         cross_long = False
     
-    # SHORT sinyal şartları:
-    if is_fresh_short_breakout and short_arm_conditions:
+    # SHORT sinyal şartları - ZORUNLU: decision_ok + sqz_light_red + red_candle
+    if (is_fresh_short_breakout or is_armed_short) and short_arm_conditions:
         cross_short = True
-    elif is_armed_short:
-        if short_arm_conditions:
-            cross_short = True
-        else:
-            cross_short = decision_ok_short
     else:
         cross_short = False
 
