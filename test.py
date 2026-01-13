@@ -357,7 +357,7 @@ class PosState:
     entry_bar_ts: int = 0                # Giriş barının timestamp'i (aynı barda TP/SL kontrolü yapılmasın)
 
 # ARM (Armed Breakout) timeout - kaç bar içinde HTF uygun olmazsa kırılım geçersiz
-BREAKOUT_ARM_BARS = int(os.getenv("BREAKOUT_ARM_BARS", "18"))  # 18 bar = 3 gün (4H)
+BREAKOUT_ARM_BARS = int(os.getenv("BREAKOUT_ARM_BARS", "4"))  # 4 bar = 16 saat (4H) - kısa ve net
 
 _state_lock = threading.Lock()
 _state_async_lock = asyncio.Lock()  # async race condition önleme
@@ -1552,9 +1552,9 @@ async def ltf_sqz_confirm(symbol: str, bar_open_ts_4h: int, side: str) -> bool:
         mom_prev = np.roll(mom, 1)
         mom_prev[0] = np.nan
 
-        # LazyBear SQZ Momentum renkleri
-        sqz_open_green = (mom > 0) & (mom > mom_prev)   # Açık yeşil (lime) - LONG için
-        sqz_open_red = (mom < 0) & (mom > mom_prev)    # Açık kırmızı - SHORT için (düzeltildi!)
+        # LazyBear SQZ Momentum renkleri (4H ile TUTARLI)
+        sqz_lime = (mom > 0) & (mom > mom_prev)       # Açık yeşil - LONG için
+        sqz_open_red = (mom < 0) & (mom > mom_prev)   # Açık kırmızı - SHORT için
 
         # Timestamp'leri grid'e hizala
         ts_arr = df2["timestamp"].to_numpy(dtype=np.int64)
@@ -1574,7 +1574,7 @@ async def ltf_sqz_confirm(symbol: str, bar_open_ts_4h: int, side: str) -> bool:
             i = int(idxs[-1])
 
         if side == "LONG":
-            return bool(sqz_open_green[i])
+            return bool(sqz_lime[i])
         else:
             return bool(sqz_open_red[i])
 
@@ -1692,27 +1692,34 @@ async def check_signals(symbol: str, timeframe: str = '4h'):
                    not st.long_breakout_active and not st.short_breakout_active)
     
     if is_new_coin:
-        # YENİ YAKLAŞIM: Yeni coin'de hakkı yakma, sadece rejimi tanı
-        # signal_given = False bırak, böylece ilk uygun koşulda sinyal gelebilir
+        # YENİ YAKLAŞIM: Yeni coin'de sadece rejimi tanı, ARM başlatma!
+        # Her iki tarafta da signal_given=True, GERÇEK kırılım bekle
         if price_above:
             # Fiyat zaten üstte - LONG bölgesinde başlıyoruz
-            # Kırılım aktif ama sinyal hakkı VAR (yakılmadı)
             st.long_breakout_active = True
-            st.long_signal_given = False  # ← FIX: Hakkı yakma!
-            st.long_breakout_bar_ts = bar_ts  # ARM başlat
+            st.long_signal_given = True    # İlk görüşte sinyal YOK
+            st.long_breakout_bar_ts = 0    # ARM başlatma!
             st.short_breakout_active = False
-            st.short_signal_given = False
-            logger.info(f"[WARMUP] {symbol} starting in LONG zone - signal eligible")
+            st.short_signal_given = True   # SHORT için de hak yok (temizlik)
+            st.short_breakout_bar_ts = 0
+            logger.info(f"[WARMUP] {symbol} starting in LONG zone - waiting for new breakout")
         elif price_below:
             # Fiyat zaten altta - SHORT bölgesinde başlıyoruz
             st.short_breakout_active = True
-            st.short_signal_given = False  # ← FIX: Hakkı yakma!
-            st.short_breakout_bar_ts = bar_ts
+            st.short_signal_given = True   # İlk görüşte sinyal YOK
+            st.short_breakout_bar_ts = 0   # ARM başlatma!
             st.long_breakout_active = False
-            st.long_signal_given = False
-            logger.info(f"[WARMUP] {symbol} starting in SHORT zone - signal eligible")
+            st.long_signal_given = True    # LONG için de hak yok (temizlik)
+            st.long_breakout_bar_ts = 0
+            logger.info(f"[WARMUP] {symbol} starting in SHORT zone - waiting for new breakout")
         else:
-            # Ortada - sinyal için kırılım bekle
+            # Ortada - her iki taraf da kapalı, kırılım bekle
+            st.long_breakout_active = False
+            st.long_signal_given = True
+            st.long_breakout_bar_ts = 0
+            st.short_breakout_active = False
+            st.short_signal_given = True
+            st.short_breakout_bar_ts = 0
             logger.info(f"[WARMUP] {symbol} starting in NEUTRAL zone - waiting for breakout")
 
     # ============ KIRILIM MANTIĞI (ARM - Armed Breakout) ============
@@ -1720,26 +1727,34 @@ async def check_signals(symbol: str, timeframe: str = '4h'):
     # SHORT kırılım: Fiyat indikatörlerin altına indi
     # ARM: Kırılım olunca "armed" duruma geç, HTF uygun olana kadar bekle
     
-    # Önceki bar pozisyonu (gerçek kırılım tespiti için)
+    # DEBOUNCE: Whipsaw önleme - 2 bar aynı bölgede kalma şartı
+    # Son 2 bar aynı bölgede olmalı (confirmed)
+    price_above_curr = price_above  # Bar -2 (confirmed)
     price_above_prev = bool(df["tce_price_above_indicators"].iloc[-3]) if len(df) > 2 and "tce_price_above_indicators" in df.columns else False
-    price_below_prev = bool(df["tce_price_below_indicators"].iloc[-3]) if len(df) > 2 and "tce_price_below_indicators" in df.columns else False
+    price_above_prev2 = bool(df["tce_price_above_indicators"].iloc[-4]) if len(df) > 3 and "tce_price_above_indicators" in df.columns else False
     
-    # GERÇEK KIRILIM: Önceki bar farklı bölgedeydi, şimdi geçiş oldu
-    real_long_breakout = price_above and not price_above_prev  # Alttan üste geçti
-    real_short_breakout = price_below and not price_below_prev  # Üstten alta geçti
+    price_below_curr = price_below
+    price_below_prev = bool(df["tce_price_below_indicators"].iloc[-3]) if len(df) > 2 and "tce_price_below_indicators" in df.columns else False
+    price_below_prev2 = bool(df["tce_price_below_indicators"].iloc[-4]) if len(df) > 3 and "tce_price_below_indicators" in df.columns else False
+    
+    # GERÇEK KIRILIM (DEBOUNCED):
+    # LONG: Şimdi ve önceki bar üstte + 2 bar önce alttaydı
+    # Yani: 2 bar üst üste LONG bölgesinde kaldı
+    real_long_breakout = price_above_curr and price_above_prev and not price_above_prev2
+    real_short_breakout = price_below_curr and price_below_prev and not price_below_prev2
     
     # ============ 4H SQZ RENK FİLTRESİ ============
     # LazyBear SQZ Momentum renkleri:
-    # - Açık Yeşil (Lime): mom > 0 VE mom > mom_prev → LONG için şart
-    # - Açık Kırmızı: mom < 0 VE mom > mom_prev → SHORT için şart
+    # - Açık Yeşil (Lime): mom > 0 VE mom > mom_prev (momentum artıyor) → LONG
+    # - Açık Kırmızı (Open Red): mom < 0 VE mom > mom_prev (düşüş yavaşlıyor) → SHORT
     
     last = df.iloc[-2]  # Kapanmış bar (confirmed)
     
     mom = safe_float(last.get("tce_sqz_mom", np.nan), np.nan)
     mom_prev = safe_float(df.iloc[-3].get("tce_sqz_mom", np.nan), np.nan) if len(df) > 2 else np.nan
     
-    sqz_lime = bool(np.isfinite(mom) and np.isfinite(mom_prev) and mom > 0 and mom > mom_prev)  # Açık yeşil
-    sqz_light_red = bool(np.isfinite(mom) and np.isfinite(mom_prev) and mom < 0 and mom > mom_prev)  # Açık kırmızı
+    sqz_lime = bool(np.isfinite(mom) and np.isfinite(mom_prev) and mom > 0 and mom > mom_prev)  # Açık yeşil (LONG)
+    sqz_open_red = bool(np.isfinite(mom) and np.isfinite(mom_prev) and mom < 0 and mom > mom_prev)  # Açık kırmızı (SHORT)
     
     # ============ MUM RENGİ FİLTRESİ ============
     candle_open = safe_float(last.get("open", np.nan), np.nan)
@@ -1750,13 +1765,13 @@ async def check_signals(symbol: str, timeframe: str = '4h'):
 
     # ============ STRICT ARM MANTIĞI ============
     # ARM sadece şu durumda başlar:
-    # 1. REAL breakout oldu (fiyat rejim değiştirdi)
+    # 1. REAL breakout oldu (fiyat rejim değiştirdi + 2 bar kaldı)
     # 2. VE o barda decision_ok + SQZ + mum tuttu
     # Bu sayede "fakey" kırılımlar ARM'lanmaz
     
     # İlk kırılım şartları (ARM başlatmak için)
     long_arm_conditions = decision_ok_long and sqz_lime and is_green_candle
-    short_arm_conditions = decision_ok_short and sqz_light_red and is_red_candle
+    short_arm_conditions = decision_ok_short and sqz_open_red and is_red_candle  # Açık kırmızı kullan
     
     # ARM PENCERE: Kırılım sonrası N bar içinde şartlar tutarsa ARM başlat
     ARM_WINDOW_BARS = 3  # Kırılım + sonraki 2 bar içinde şartlar tutarsa ARM
@@ -1802,7 +1817,7 @@ async def check_signals(symbol: str, timeframe: str = '4h'):
             st.long_breakout_active = False
             st.long_signal_given = False
             st.long_breakout_bar_ts = 0
-            logger.info(f"[ARM] {symbol} SHORT armed | decision_ok={decision_ok_short}, sqz_light_red={sqz_light_red}, red={is_red_candle}")
+            logger.info(f"[ARM] {symbol} SHORT armed | decision_ok={decision_ok_short}, sqz_open_red={sqz_open_red}, red={is_red_candle}")
         else:
             # Kırılım oldu ama şartlar tutmuyor → Hakkı YAKMA, pencere içinde bekle
             st.short_breakout_active = True
@@ -1863,7 +1878,7 @@ async def check_signals(symbol: str, timeframe: str = '4h'):
     else:
         cross_long = False
     
-    # SHORT sinyal şartları - ZORUNLU: decision_ok + sqz_light_red + red_candle
+    # SHORT sinyal şartları - ZORUNLU: decision_ok + sqz_dark_red + red_candle
     if (is_fresh_short_breakout or is_armed_short) and short_arm_conditions:
         cross_short = True
     else:
@@ -1885,7 +1900,7 @@ async def check_signals(symbol: str, timeframe: str = '4h'):
     criteria.record("is_armed_long", is_armed_long)  # ARM modunda mı
     criteria.record("is_armed_short", is_armed_short)
     criteria.record("sqz_lime", sqz_lime)  # LONG için açık yeşil
-    criteria.record("sqz_light_red", sqz_light_red)  # SHORT için açık kırmızı
+    criteria.record("sqz_open_red", sqz_open_red)  # SHORT için açık kırmızı
     criteria.record("is_green_candle", is_green_candle)  # Yeşil mum
     criteria.record("is_red_candle", is_red_candle)  # Kırmızı mum
     criteria.record("sqz_pass_long", bool(last.get("tce_sqz_pass_long", True)))
@@ -2184,7 +2199,7 @@ async def main():
                     logger.info(f" - {name}: {false_cnt}/{total_cnt} ({pct:.1f}%)")
                 
                 # Önemli kriterleri her zaman göster (items'da olmasa bile)
-                important_keys = ["cross_long", "cross_short", "sqz_lime", "sqz_light_red", 
+                important_keys = ["cross_long", "cross_short", "sqz_lime", "sqz_open_red", 
                                   "is_green_candle", "is_red_candle", "long_breakout_active", 
                                   "short_breakout_active", "decision_ok_long", "decision_ok_short"]
                 shown_keys = [x[0] for x in items[:20]]
