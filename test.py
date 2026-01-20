@@ -355,6 +355,7 @@ class PosState:
     tp2_hit: bool = False                # TP2 vuruldu mu
     remaining_pct: float = 100.0         # Kalan pozisyon yüzdesi
     entry_bar_ts: int = 0                # Giriş barının timestamp'i (aynı barda TP/SL kontrolü yapılmasın)
+    ema_partial_exit_done: bool = False  # EMA kısmi çıkış yapıldı mı (tekrar tetiklemeyi önle)
 
 # ARM (Armed Breakout) timeout - kaç bar içinde HTF uygun olmazsa kırılım geçersiz
 BREAKOUT_ARM_BARS = int(os.getenv("BREAKOUT_ARM_BARS", "4"))  # 4 bar = 16 saat (4H) - kısa ve net
@@ -1340,7 +1341,7 @@ def format_signal(symbol: str, timeframe: str, side: str, df: pd.DataFrame, plan
     tf_ms = _tf_to_ms(timeframe)  # 4h = 4*60*60*1000
     close_ts_ms = ts_ms + tf_ms  # kapanış zamanı
     dt = datetime.fromtimestamp(close_ts_ms / 1000, tz=ZoneInfo("UTC")).astimezone(ZoneInfo(DEFAULT_TZ))
-    date_str = dt.strftime("%d.%m.%Y %H:%M")
+    date_str = dt.strftime("%d.%m.%Y")
 
     if side == "LONG":
         head = f"{symbol} {timeframe}: BUY (LONG) 📈"
@@ -1358,7 +1359,7 @@ def format_signal(symbol: str, timeframe: str, side: str, df: pd.DataFrame, plan
 
     lines = [
         head,
-        "",
+        f"Sebep: TCE Signal",
         f"Entry: {_fmt_price(entry)}",
         f"SL: {_fmt_price(sl)}",
         f"TP1: {_fmt_price(tp1)}",
@@ -2021,6 +2022,7 @@ async def check_signals(symbol: str, timeframe: str = '4h'):
     st.tp1_hit = False
     st.tp2_hit = False
     st.remaining_pct = 100.0
+    st.ema_partial_exit_done = False  # Yeni pozisyon, flag resetle
     
     async with _state_async_lock:
         state_map[key] = st
@@ -2049,11 +2051,7 @@ async def check_position_exit(symbol: str, timeframe: str, df: pd.DataFrame, st:
             old_sl = st.sl_price
             st.sl_price = st.entry_price  # SL girişe
             
-            msg = (f"🎯 {symbol} {timeframe}: TP1 HIT!\n"
-                   f"TP1 Fiyat: {_fmt_price(exit_price)}\n"
-                   f"P/L: +{profit_pct:.2f}%\n"
-                   f"%30 kapatıldı, SL girişe çekildi\n"
-                   f"Kalan: %{st.remaining_pct:.0f}")
+            msg = f"{symbol} {timeframe}: TP1 Hit 🎯 Cur: {_fmt_price(current_price)} | TP1: {_fmt_price(exit_price)} P/L: +{profit_pct:.2f}% | %30 kapandı, Stop girişe çekildi. Kalan: %{st.remaining_pct:.0f}"
             await enqueue_message(msg)
             
             async with _state_async_lock:
@@ -2067,11 +2065,7 @@ async def check_position_exit(symbol: str, timeframe: str, df: pd.DataFrame, st:
             st.tp2_hit = True
             st.remaining_pct = 40.0  # %30 daha kapandı
             
-            msg = (f"🎯🎯 {symbol} {timeframe}: TP2 HIT!\n"
-                   f"TP2 Fiyat: {_fmt_price(exit_price)}\n"
-                   f"P/L: +{profit_pct:.2f}%\n"
-                   f"%30 daha kapatıldı\n"
-                   f"Kalan: %{st.remaining_pct:.0f}")
+            msg = f"{symbol} {timeframe}: TP2 Hit 🎯🎯 Cur: {_fmt_price(current_price)} | TP2: {_fmt_price(exit_price)} P/L: +{profit_pct:.2f}% | %30 kapandı, kalan %{st.remaining_pct:.0f} açık."
             await enqueue_message(msg)
             
             async with _state_async_lock:
@@ -2087,10 +2081,8 @@ async def check_position_exit(symbol: str, timeframe: str, df: pd.DataFrame, st:
             else:
                 profit_pct = (st.entry_price - exit_price) / st.entry_price * 100
             
-            msg = (f"⛔ {symbol} {timeframe}: STOP LOSS!\n"
-                   f"SL Fiyat: {_fmt_price(exit_price)}\n"
-                   f"P/L: {profit_pct:+.2f}%\n"
-                   f"Pozisyon kapatıldı")
+            side_text = "LONG" if st.position_side == "LONG" else "SHORT"
+            msg = f"{symbol} {timeframe}: STOP {side_text} ⛔ Price: {_fmt_price(exit_price)} P/L: {profit_pct:+.2f}% Kalan: %{st.remaining_pct:.0f}"
             await enqueue_message(msg)
             
             # Pozisyonu kapat
@@ -2110,34 +2102,20 @@ async def check_position_exit(symbol: str, timeframe: str, df: pd.DataFrame, st:
         else:
             profit_pct = (st.entry_price - current_price) / st.entry_price * 100
         
-        if close_pct >= 100 or ema_reason in ["EMA_EXIT_UNDER_SL", "EMA_EXIT_OVER_SL"]:
-            # Tümünü kapat
-            msg = (f"🔄 {symbol} {timeframe}: EMA ÇIKIŞ\n"
-                   f"Sebep: {ema_reason}\n"
-                   f"Fiyat: {_fmt_price(current_price)}\n"
-                   f"P/L: {profit_pct:+.2f}%\n"
-                   f"Pozisyon kapatıldı")
-            await enqueue_message(msg)
-            
-            st.position_open = False
-            st.remaining_pct = 0.0
-            
+        # EMA çıkış = %100 kapat (kısmi çıkış yok)
+        side_text = st.position_side
+        if profit_pct > 0:
+            msg = f"{symbol} {timeframe}: PARAYI VURDUK🚀 ({side_text}) 🔁 Price: {_fmt_price(current_price)} P/L: {profit_pct:+.2f}%"
         else:
-            # %50 kapat, SL girişe çek
-            st.remaining_pct = st.remaining_pct * 0.5
-            st.sl_price = st.entry_price
-            
-            msg = (f"🔄 {symbol} {timeframe}: EMA ÇIKIŞ (Kısmi)\n"
-                   f"Sebep: {ema_reason}\n"
-                   f"Fiyat: {_fmt_price(current_price)}\n"
-                   f"P/L: {profit_pct:+.2f}%\n"
-                   f"%50 kapatıldı, SL girişe çekildi\n"
-                   f"Kalan: %{st.remaining_pct:.0f}")
-            await enqueue_message(msg)
+            msg = f"{symbol} {timeframe}: EMA ÇIKIŞ ({side_text}) 🔁 Price: {_fmt_price(current_price)} P/L: {profit_pct:+.2f}%"
+        await enqueue_message(msg)
+        
+        st.position_open = False
+        st.remaining_pct = 0.0
         
         async with _state_async_lock:
             state_map[key] = st
-        return st.remaining_pct <= 0
+        return True
     
     return False
 
