@@ -360,8 +360,7 @@ class PosState:
 # ARM (Armed Breakout) timeout - kaç bar içinde HTF uygun olmazsa kırılım geçersiz
 BREAKOUT_ARM_BARS = int(os.getenv("BREAKOUT_ARM_BARS", "4"))  # 4 bar = 16 saat (4H) - kısa ve net
 
-_state_lock = threading.Lock()
-_state_async_lock = asyncio.Lock()  # async race condition önleme
+_state_async_lock = asyncio.Lock()  # Tüm state güncellemeleri bu lock altında
 state_map: Dict[str, PosState] = {}
 
 
@@ -404,10 +403,11 @@ def load_state() -> None:
         logger.warning(f"State load failed: {e.__class__.__name__}: {e}")
 
 def save_state() -> None:
-    """Senkron save_state - sadece startup/shutdown için."""
+    """Senkron save_state - sadece startup/shutdown için.
+    NOT: Async loop çalışırken çağrılmamalı. Shutdown'da loop durmuş olmalı.
+    """
     try:
-        with _state_lock:
-            raw = {k: vars(v) for k, v in state_map.items()}
+        raw = {k: vars(v) for k, v in state_map.items()}
         with open(STATE_FILE, "w", encoding="utf-8") as f:
             json.dump(raw, f, ensure_ascii=False, indent=2)
     except Exception as e:
@@ -882,8 +882,8 @@ def _tce_scores(df: pd.DataFrame) -> None:
     # SHORT için: Açık kırmızı (mom < 0 ama artıyor = düşüş zayıflıyor)
     mom = df["tce_sqz_mom"].to_numpy(dtype=np.float64)
     mom_prev = np.roll(mom, 1); mom_prev[0] = np.nan
-    sqzLime_long = (mom > 0) & (mom > mom_prev)   # Açık yeşil
-    sqzLime_short = (mom < 0) & (mom > mom_prev)  # Açık kırmızı (düzeltildi!)
+    sqzLime_long = (mom > 0) & (mom > mom_prev)   # Açık yeşil (yükseliş hızlanıyor)
+    sqzLime_short = (mom < 0) & (mom < mom_prev)  # Açık kırmızı (düşüş hızlanıyor)
 
     sqzMode = (TCE_SQZ_MODE or "Soft").strip()
     sqzUsed = sqzMode.lower() != "off"
@@ -1191,12 +1191,10 @@ def add_ema_exit_columns(df: pd.DataFrame) -> pd.DataFrame:
 def check_ema_exit(df: pd.DataFrame, st: 'PosState') -> Tuple[bool, str, float]:
     """
     EMA13/34 çıkış kontrolü.
+    EMA cross olduğunda %100 kapatır (partial exit yok).
     
     Returns:
         (should_exit, exit_reason, close_pct)
-        - should_exit: Çıkış yapılmalı mı
-        - exit_reason: Çıkış sebebi
-        - close_pct: Kapatılacak pozisyon yüzdesi (0-100)
     """
     if not st.position_open:
         return False, "", 0.0
@@ -1206,7 +1204,6 @@ def check_ema_exit(df: pd.DataFrame, st: 'PosState') -> Tuple[bool, str, float]:
         df = add_ema_exit_columns(df)
     
     last = df.iloc[-2]  # Kapanmış bar
-    current_price = float(last["close"])
     
     # EMA kesişimi var mı?
     if st.position_side == "LONG":
@@ -1217,40 +1214,8 @@ def check_ema_exit(df: pd.DataFrame, st: 'PosState') -> Tuple[bool, str, float]:
     if not ema_cross:
         return False, "", 0.0
     
-    # EMA kesişimi var, fiyat nerede?
-    entry = st.entry_price
-    sl = st.sl_price
-    tp1 = st.tp1_price
-    tp2 = st.tp2_price
-    
-    if st.position_side == "LONG":
-        # LONG pozisyon
-        if current_price < sl:
-            # SL altında → %100 kapat (zarar kes)
-            return True, "EMA_EXIT_UNDER_SL", 100.0
-        elif current_price < entry:
-            # Entry-SL arası → %50 kapat, SL girişe çekilecek
-            return True, "EMA_EXIT_UNDER_ENTRY", 50.0
-        elif current_price < tp1:
-            # Entry-TP1 arası → %50 kapat, SL girişe çekilecek
-            return True, "EMA_EXIT_BEFORE_TP1", 50.0
-        else:
-            # TP1 üstü → %100 kapat (kârda çık)
-            return True, "EMA_EXIT_AFTER_TP1", 100.0
-    
-    else:  # SHORT
-        if current_price > sl:
-            # SL üstünde → %100 kapat (zarar kes)
-            return True, "EMA_EXIT_OVER_SL", 100.0
-        elif current_price > entry:
-            # Entry-SL arası → %50 kapat
-            return True, "EMA_EXIT_OVER_ENTRY", 50.0
-        elif current_price > tp1:
-            # Entry-TP1 arası → %50 kapat
-            return True, "EMA_EXIT_BEFORE_TP1", 50.0
-        else:
-            # TP1 altı → %100 kapat (kârda çık)
-            return True, "EMA_EXIT_AFTER_TP1", 100.0
+    # EMA kesişimi var → %100 kapat
+    return True, "EMA_EXIT", 100.0
 
 
 def check_tp_sl_hits(df: pd.DataFrame, st: 'PosState') -> Tuple[bool, str]:
@@ -1282,12 +1247,10 @@ def check_tp_sl_hits(df: pd.DataFrame, st: 'PosState') -> Tuple[bool, str]:
         # TP2 kontrolü (TP1'den sonra VE henüz TP2 vurulmadıysa)
         if st.tp1_hit and not st.tp2_hit and high >= st.tp2_price:
             return True, "TP2_HIT"
-        # SL kontrolü - TP1 hit olduysa SL girişte, close'a bak (low değil)
+        # SL kontrolü - TP1 hit olduysa SL girişte, TEMAS ile tetikle (low)
         if st.tp1_hit:
-            # TP1 vurulduysa SL girişe çekilmiş, CLOSE fiyatına bak
-            # < kullan (eşitlikte tetikleme, küçük dalgalanmada çıkmasın)
-            close = float(last["close"])
-            if close < st.sl_price:
+            # TP1 vurulduysa SL girişe çekilmiş, low ile temas kontrolü
+            if low <= st.sl_price:
                 return True, "SL_HIT"
         else:
             # TP1 vurulmadıysa normal SL kontrolü (low'a bak)
@@ -1301,12 +1264,10 @@ def check_tp_sl_hits(df: pd.DataFrame, st: 'PosState') -> Tuple[bool, str]:
         # TP2 kontrolü (TP1'den sonra VE henüz TP2 vurulmadıysa)
         if st.tp1_hit and not st.tp2_hit and low <= st.tp2_price:
             return True, "TP2_HIT"
-        # SL kontrolü - TP1 hit olduysa SL girişte, close'a bak (high değil)
+        # SL kontrolü - TP1 hit olduysa SL girişte, TEMAS ile tetikle (high)
         if st.tp1_hit:
-            # TP1 vurulduysa SL girişe çekilmiş, CLOSE fiyatına bak
-            # > kullan (eşitlikte tetikleme, küçük dalgalanmada çıkmasın)
-            close = float(last["close"])
-            if close > st.sl_price:
+            # TP1 vurulduysa SL girişe çekilmiş, high ile temas kontrolü
+            if high >= st.sl_price:
                 return True, "SL_HIT"
         else:
             # TP1 vurulmadıysa normal SL kontrolü (high'a bak)
@@ -1520,8 +1481,8 @@ async def ltf_sqz_confirm(symbol: str, bar_open_ts_4h: int, side: str) -> bool:
     LazyBear SQZ Momentum Renkleri:
     - Açık Yeşil (Lime): mom > 0 VE mom > mom_prev (yükseliş momentumu artıyor)
     - Koyu Yeşil: mom > 0 VE mom < mom_prev (yükseliş momentumu zayıflıyor)
-    - Açık Kırmızı: mom < 0 VE mom > mom_prev (düşüş momentumu zayıflıyor)
-    - Koyu Kırmızı: mom < 0 VE mom < mom_prev (düşüş momentumu artıyor)
+    - Açık Kırmızı: mom < 0 VE mom < mom_prev (düşüş momentumu hızlanıyor)
+    - Koyu Kırmızı: mom < 0 VE mom > mom_prev (düşüş momentumu yavaşlıyor)
     
     LONG için: Açık Yeşil (lime) gerekli
     SHORT için: Açık Kırmızı gerekli
@@ -1555,7 +1516,7 @@ async def ltf_sqz_confirm(symbol: str, bar_open_ts_4h: int, side: str) -> bool:
 
         # LazyBear SQZ Momentum renkleri (4H ile TUTARLI)
         sqz_lime = (mom > 0) & (mom > mom_prev)       # Açık yeşil - LONG için
-        sqz_open_red = (mom < 0) & (mom > mom_prev)   # Açık kırmızı - SHORT için
+        sqz_open_red = (mom < 0) & (mom < mom_prev)   # Açık kırmızı - SHORT için (düşüş hızlanıyor)
 
         # Timestamp'leri grid'e hizala
         ts_arr = df2["timestamp"].to_numpy(dtype=np.int64)
@@ -1653,6 +1614,13 @@ async def check_signals(symbol: str, timeframe: str = '4h'):
         # State güncellendi, yeniden oku
         async with _state_async_lock:
             st = state_map.get(key, st)
+        
+        # Pozisyon hâlâ açıksa → yeni sinyal VERME
+        if st.position_open:
+            st.last_bar_ts = bar_ts
+            async with _state_async_lock:
+                state_map[key] = st
+            return
 
     # SPAM KORUMASI: Aynı bar için sinyal zaten attıysak tekrar atma
     # last_bar_ts = son sinyal atılan barın timestamp'i
@@ -1747,7 +1715,7 @@ async def check_signals(symbol: str, timeframe: str = '4h'):
     # ============ 4H SQZ RENK FİLTRESİ ============
     # LazyBear SQZ Momentum renkleri:
     # - Açık Yeşil (Lime): mom > 0 VE mom > mom_prev (momentum artıyor) → LONG
-    # - Açık Kırmızı (Open Red): mom < 0 VE mom > mom_prev (düşüş yavaşlıyor) → SHORT
+    # - Açık Kırmızı (Open Red): mom < 0 VE mom < mom_prev (düşüş hızlanıyor) → SHORT
     
     last = df.iloc[-2]  # Kapanmış bar (confirmed)
     
@@ -1755,7 +1723,7 @@ async def check_signals(symbol: str, timeframe: str = '4h'):
     mom_prev = safe_float(df.iloc[-3].get("tce_sqz_mom", np.nan), np.nan) if len(df) > 2 else np.nan
     
     sqz_lime = bool(np.isfinite(mom) and np.isfinite(mom_prev) and mom > 0 and mom > mom_prev)  # Açık yeşil (LONG)
-    sqz_open_red = bool(np.isfinite(mom) and np.isfinite(mom_prev) and mom < 0 and mom > mom_prev)  # Açık kırmızı (SHORT)
+    sqz_open_red = bool(np.isfinite(mom) and np.isfinite(mom_prev) and mom < 0 and mom < mom_prev)  # Açık kırmızı (SHORT - düşüş hızlanıyor)
     
     # ============ MUM RENGİ FİLTRESİ ============
     candle_open = safe_float(last.get("open", np.nan), np.nan)
@@ -1774,10 +1742,8 @@ async def check_signals(symbol: str, timeframe: str = '4h'):
     long_arm_conditions = decision_ok_long and sqz_lime and is_green_candle
     short_arm_conditions = decision_ok_short and sqz_open_red and is_red_candle  # Açık kırmızı kullan
     
-    # ARM PENCERE: Kırılım sonrası N bar içinde şartlar tutarsa ARM başlat
-    ARM_WINDOW_BARS = 3  # Kırılım + sonraki 2 bar içinde şartlar tutarsa ARM
+    # ARM PENCERE: Timeout ile kontrol ediliyor (BREAKOUT_ARM_BARS)
     tf_ms = _tf_to_ms(timeframe)
-    arm_window_ms = ARM_WINDOW_BARS * tf_ms
     
     # Kırılım durumunu güncelle
     if real_long_breakout:
@@ -1801,13 +1767,8 @@ async def check_signals(symbol: str, timeframe: str = '4h'):
             st.short_breakout_bar_ts = 0
             logger.info(f"[ARM_PENDING] {symbol} LONG breakout - waiting for conditions in {ARM_WINDOW_BARS} bar window")
     
-    # ARM PENCERE içinde şartlar tutarsa ARM'ı aktifle (kırılımdan sonraki barlar)
-    if st.long_breakout_active and not st.long_signal_given and st.long_breakout_bar_ts > 0:
-        bars_since_breakout = (bar_ts - st.long_breakout_bar_ts) // tf_ms
-        if bars_since_breakout > 0 and bars_since_breakout <= ARM_WINDOW_BARS:
-            if long_arm_conditions:
-                logger.info(f"[ARM_WINDOW] {symbol} LONG conditions met {bars_since_breakout} bars after breakout")
-                # ARM zaten aktif, şimdi sinyal verilebilir
+    # ARM PENCERE: Kırılım sonrasında şartlar zaten is_armed_long ile kontrol ediliyor
+    # (Ayrı pencere kodu gereksiz — ARM aktif oldukça sinyal verilebilir, timeout'ta kapanır)
     
     if real_short_breakout:
         if short_arm_conditions:
@@ -1829,12 +1790,7 @@ async def check_signals(symbol: str, timeframe: str = '4h'):
             st.long_breakout_bar_ts = 0
             logger.info(f"[ARM_PENDING] {symbol} SHORT breakout - waiting for conditions in {ARM_WINDOW_BARS} bar window")
     
-    # ARM PENCERE içinde şartlar tutarsa ARM'ı aktifle
-    if st.short_breakout_active and not st.short_signal_given and st.short_breakout_bar_ts > 0:
-        bars_since_breakout = (bar_ts - st.short_breakout_bar_ts) // tf_ms
-        if bars_since_breakout > 0 and bars_since_breakout <= ARM_WINDOW_BARS:
-            if short_arm_conditions:
-                logger.info(f"[ARM_WINDOW] {symbol} SHORT conditions met {bars_since_breakout} bars after breakout")
+    # ARM PENCERE: SHORT için de aynı — is_armed_short zaten kontrol ediyor
     
     # ARM TIMEOUT kontrolü - kırılım çok eskiyse geçersiz say
     arm_timeout_ms = BREAKOUT_ARM_BARS * tf_ms
